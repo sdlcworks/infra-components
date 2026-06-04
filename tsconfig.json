@@ -1,0 +1,11 @@
+{
+  "extends": "./.js/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "*": ["./.js/node_modules/*"]
+    },
+    "typeRoots": ["./.js/node_modules/@types"]
+  }
+}
