@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "sdlc-components",
@@ -12,9 +13,9 @@
         "@pulumi/kubernetes": "^4.28.0",
         "@pulumi/pulumi": "3.213.0",
         "@pulumi/tls": "^5.3.0",
-        "@sdlcworks/components": "0.0.61",
+        "@sdlcworks/components": "0.0.63",
         "js-yaml": "^4.1.1",
-        "zod": "^4.2.1",
+        "zod": "4.1.13",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -191,7 +192,7 @@
 
     "@pulumi/tls": ["@pulumi/tls@5.3.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-yCij6Frm8V/Tsd6oQi15bKN3IhABazNcAmbMBJAxDezOV7Uv/Sc6BhEe+ncJRf00OYGmZXb3K6NyKTxbf6A+fg=="],
 
-    "@sdlcworks/components": ["@sdlcworks/components@0.0.61", "", { "dependencies": { "zod": "4.1.13" }, "peerDependencies": { "@pulumi/aws": "^7.14.0", "@pulumi/cloudflare": "^6.13.0", "@pulumi/gcp": "^9.6.0", "@pulumi/pulumi": "3.213.0", "typescript": "^5.0.0" }, "optionalPeers": ["@pulumi/aws", "@pulumi/cloudflare", "@pulumi/gcp"] }, "sha512-4eI5aSfz04LLmCDiNwwoxEspHbI/QtacIW6RlyCk16ayvpSl9hi0v700PD3a83CWku3yqwzScsbBUVNcr6WD/Q=="],
+    "@sdlcworks/components": ["@sdlcworks/components@0.0.63", "", { "peerDependencies": { "@pulumi/aws": "^7.14.0", "@pulumi/cloudflare": "^6.13.0", "@pulumi/gcp": "^9.6.0", "@pulumi/pulumi": "3.213.0", "typescript": "^5.0.0", "zod": "^4.0.0" }, "optionalPeers": ["@pulumi/aws", "@pulumi/cloudflare", "@pulumi/gcp"] }, "sha512-OLY1RYP021qm2e4momzQbIvRHjMFaJiaeIVesRr2VPCiPeRKp+GFdBtK5OWxSCyw6KugYejcPKGHgKsvUuUNxg=="],
 
     "@sigstore/bundle": ["@sigstore/bundle@2.3.2", "", { "dependencies": { "@sigstore/protobuf-specs": "^0.3.2" } }, "sha512-wueKWDk70QixNLB363yHc2D2ItTgYiMTdPwK8D9dKQMR3ZQ0c35IxP5xnwQ8cNLoCgCRcHf14kE+CLIvNX1zmA=="],
 
@@ -729,7 +730,7 @@
 
     "yargs-parser": ["yargs-parser@21.1.1", "", {}, "sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw=="],
 
-    "zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+    "zod": ["zod@4.1.13", "", {}, "sha512-AvvthqfqrAhNH9dnfmrfKzX5upOdjUVJYFqNSlkmGf64gRaTzlPwz99IHYnVs28qYAybvAlBV+H7pn0saFY4Ig=="],
 
     "@aws-crypto/sha256-browser/@smithy/util-utf8": ["@smithy/util-utf8@2.3.0", "", { "dependencies": { "@smithy/util-buffer-from": "^2.2.0", "tslib": "^2.6.2" } }, "sha512-R8Rdn8Hy72KKcebgLiv8jQcQkXoLMOGGv5uI1/k0l+snqkOzQ1R0ChUBCxWMlBsFMekWjq0wRudIweFs7sKT5A=="],
 
@@ -774,8 +775,6 @@
     "@pulumi/docker/semver": ["semver@5.7.2", "", { "bin": "bin/semver" }, "sha512-cBznnQ9KjJqU67B52RMC65CMarK2600WFnbkcaiwWq3xy/5haFJlshgnpjovMVJ+Hff49d8GEn0b87C5pDQ10g=="],
 
     "@pulumi/pulumi/js-yaml": ["js-yaml@3.14.2", "", { "dependencies": { "argparse": "^1.0.7", "esprima": "^4.0.0" }, "bin": "bin/js-yaml.js" }, "sha512-PMSmkqxr106Xa156c2M265Z+FTrPl+oxd/rgOQy2tijQeK5TxQ43psO1ZCwhVOSdnn+RzkzlRz/eY4BgJBYVpg=="],
-
-    "@sdlcworks/components/zod": ["zod@4.1.13", "", {}, "sha512-AvvthqfqrAhNH9dnfmrfKzX5upOdjUVJYFqNSlkmGf64gRaTzlPwz99IHYnVs28qYAybvAlBV+H7pn0saFY4Ig=="],
 
     "@sigstore/sign/proc-log": ["proc-log@4.2.0", "", {}, "sha512-g8+OnU/L2v+wyiVK+D5fA34J7EH8jZ8DDlvwhRCMxmMj7UCBvxiO1mGeN+36JXIKF4zevU4kRBd8lVgG9vLelA=="],
 
