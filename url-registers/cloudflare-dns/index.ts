@@ -3,7 +3,7 @@ import * as cloudflare from "@pulumi/cloudflare";
 import { URLRegister } from "@sdlcworks/components";
 import { PublicCI } from "../../_internal/interfaces";
 import { LOG_PREFIX } from "./constants";
-import type { BranchMetadataCloudCredentialCloudflare } from "@sdlc/types";
+import type { CloudCredentialCloudflare } from "@sdlcworks/components";
 import { ConfigSchema, type Config, isWorkerRecord } from "./schema";
 import {
   buildComponentResultUri,
@@ -26,7 +26,7 @@ const register = new URLRegister({
     // config values are concrete by the time we run. Cast once at the boundary.
     const config = ctx.config as unknown as Config;
     const { components, $ } = ctx;
-    const creds = ctx.getCredentials() as BranchMetadataCloudCredentialCloudflare;
+    const creds = ctx.getCredentials() as CloudCredentialCloudflare;
 
     const results: Record<string, pulumi.Output<string>> = {};
 
