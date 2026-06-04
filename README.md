@@ -65,13 +65,3 @@ Runtime dependencies are declared in `.js/package.json`:
 - `zod`, `js-yaml`
 
 The lock file is `.js/bun.lock` (bun is the package manager; no `package-lock.json`).
-
-## Known issues
-
-### `@sdlc/types` import in `url-registers/cloudflare-dns/index.ts`
-
-Line 6 imports `BranchMetadataCloudCredentialCloudflare` from `@sdlc/types`. This package does not exist on npm and is not declared in `package.json`. The type IS exported by `@sdlcworks/components` (from its `copied-types` module). In the monorepo, this import likely resolves via workspace hoisting. For standalone use, it must be changed to import from `@sdlcworks/components`. This has not been changed in this extraction -- it needs a deliberate fix before the repo is functional standalone.
-
-## Open design decision: component name for coexistence
-
-The `sdlc.toml` declares this as `["@infra"]`. When an SDLC project uses this as its infra source, the component name `@infra` is what the platform recognises. If a project also has its own local `@infra` component, there is a naming collision. The coexistence naming strategy (e.g., whether the centralised repo always claims `@infra`, or whether it uses a different name, or whether the platform supports namespaced disambiguation) is an open design decision. For now, the name is `@infra` -- unchanged from the monorepo source.

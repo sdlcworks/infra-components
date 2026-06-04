@@ -1,7 +1,7 @@
-["@infra"]
+["@infra-components"]
 infra_code = true
 
-["@infra".build.default]
+["@infra-components".build.default]
 # Note: `bun -C <dir>` was removed in newer Bun (>= 1.3); use a subshell cd
 # so the install runs in .js while sdlc-components-build runs at the @infra root.
 build_cmd = "(cd .js && bun install) && sdlc-components-build --bundle"
