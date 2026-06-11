@@ -1,3 +1,55 @@
+/**
+ * hetzner-vm — Standalone Hetzner Cloud VM infrastructure component.
+ *
+ * Creates a single Hetzner Cloud server with stable public IPs, managed SSH
+ * keys, optional firewall, and cloud-init support. Pure infrastructure: no
+ * app-component allocation, no artifact deployment.
+ *
+ * Example config (dev-workspace VM):
+ *
+ *   {
+ *     "serverType": "cx22",
+ *     "image": "ubuntu-24.04",
+ *     "location": "nbg1",
+ *     "sshPublicKeys": ["ssh-ed25519 AAAA... user@host"],
+ *     "userData": "#cloud-config\npackages:\n  - docker.io\n  - tmux\n",
+ *     "ipv4Enabled": true,
+ *     "ipv6Enabled": true,
+ *     "firewallRules": [
+ *       {
+ *         "direction": "in",
+ *         "protocol": "tcp",
+ *         "port": "22",
+ *         "sourceIps": ["0.0.0.0/0", "::/0"],
+ *         "description": "Allow SSH"
+ *       },
+ *       {
+ *         "direction": "in",
+ *         "protocol": "tcp",
+ *         "port": "80",
+ *         "sourceIps": ["0.0.0.0/0", "::/0"],
+ *         "description": "Allow HTTP"
+ *       },
+ *       {
+ *         "direction": "in",
+ *         "protocol": "tcp",
+ *         "port": "443",
+ *         "sourceIps": ["0.0.0.0/0", "::/0"],
+ *         "description": "Allow HTTPS"
+ *       }
+ *     ],
+ *     "labels": { "env": "dev", "team": "platform" },
+ *     "backups": false,
+ *     "keepDisk": true
+ *   }
+ *
+ * Outputs:
+ *   serverId, name, ipv4Address, ipv6Address, status, location, serverType
+ *
+ * Connection type "public" exposes the server's IPv4 via PublicCI for
+ * platform URI resolution (e.g. URL registers, cross-infra connections).
+ */
+
 import { z } from "zod";
 
 import {
