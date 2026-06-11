@@ -394,10 +394,10 @@ component.implement(CloudProvider.hetzner, {
           );
         }
         return {
-          uri: pulumi.output(ip),
+          uri: pulumi.output(ip as string),
           metadata: {
             appComponentType: "server",
-            host: ip,
+            host: ip as string,
             protocol: "https" as const,
           },
         };
