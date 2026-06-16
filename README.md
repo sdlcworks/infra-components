@@ -10,6 +10,9 @@ Users reference this repo as an infra source in their SDLC project configuration
 
 | Directory | Description |
 |---|---|
+| `aws-vm/` | Standalone AWS EC2 VM (Elastic IP, Security Group, IAM instance profile, cloud-init) |
+| `gcloud-vm/` | Standalone Google Compute Engine VM (static IP, firewall, Shielded VM, cloud-init) |
+| `hetzner-vm/` | Standalone Hetzner Cloud VM (PrimaryIP, firewall, cloud-init) |
 | `k3s/` | Single-node k3s Kubernetes cluster on GCP (VM, firewall, TLS, CNPG, ingress) |
 | `vpc/` | GCP Virtual Private Cloud network |
 | `subnet/` | GCP VPC subnet |
