@@ -54,10 +54,11 @@ const component = new InfraComponent({
   connectionTypes: {
     trigger: {
       description: "allows execution of the Cloud Run Job",
-      interface: ServiceAccountCI,
+      interface: CloudRunJobHTTPCI,
     },
   } as const,
-  connectionInterfaces: [CloudRunJobHTTPCI],
+  connectionInterfaces: [ServiceAccountCI, CloudRunJobHTTPCI],
+  acceptedArtifactTypes: [DeploymentArtifactType.oci_spec_image],
   configSchema: z.object({
     // Core
     region: z.string().default("us-central1"),
@@ -81,7 +82,9 @@ const component = new InfraComponent({
       memory: "512Mi",
     }),
   }),
-  appComponentTypes: defaultAppComponentType(z.object({})),
+  appComponentTypes: {
+    "default": z.object({}),
+  },
   outputSchema: z.object({
     id: z.string(),
     name: z.string(),
