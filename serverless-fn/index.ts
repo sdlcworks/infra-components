@@ -299,11 +299,17 @@ component.implement(CloudProvider.gcloud, {
     region: z.string(),
     project: z.string(),
     serviceUri: z.string(),
+    serviceAccountEmail: z.string(),
+    containerPort: z.number(),
+    backendServiceId: z.string().optional(),
+    negId: z.string().optional(),
     // HTTP trigger SA credentials
     httpTriggerSaEmail: z.string(),
     httpTriggerSaKeyJson: z.string(),
+    // Per-app-component allocations
+    allocations: z.record(z.string(), AllocationSchema).default({}),
   }),
-  initialState: {},
+  initialState: { allocations: {} },
 
   pulumi: async ({
     $,
@@ -419,8 +425,8 @@ component.implement(CloudProvider.gcloud, {
       },
     }, gcpOpts);
 
-    // Get GCP project from credentials
-    const project = getCredentials().project;
+    // Get GCP project from credentials (v2 credential shape)
+    const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
 
     // Create dedicated service account for HTTP triggering
     const httpTriggerSa = new gcp.serviceaccount.Account($`http-trigger-sa`, {
@@ -448,6 +454,10 @@ component.implement(CloudProvider.gcloud, {
     state.serviceUri = service.uri;
     state.httpTriggerSaEmail = httpTriggerSa.email;
     state.httpTriggerSaKeyJson = httpTriggerSaKey.privateKey;
+
+    // Track service account email + container port for connect + allocate handlers
+    state.serviceAccountEmail = serviceAccount.email;
+    state.containerPort = containerPort;
 
     // Create Backend Service resources if load balancer integration enabled
     let backendServiceId: any;
@@ -483,6 +493,9 @@ component.implement(CloudProvider.gcloud, {
       backendServiceId = backendService.selfLink;
       negId = neg.selfLink;
 
+      state.backendServiceId = backendService.selfLink;
+      state.negId = neg.selfLink;
+
       // Allow unauthenticated access through the load balancer
       // The INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER setting ensures only LB traffic reaches the service
       new gcp.cloudrunv2.ServiceIamMember($`lb-invoker`, {
@@ -501,6 +514,105 @@ component.implement(CloudProvider.gcloud, {
       location: service.location,
       backendServiceId: backendServiceId,
       negId: negId,
+    };
+  },
+
+  allocateWithPulumiCtx: async ({
+    name,
+    deploymentConfig,
+    state,
+    $,
+    buildArtifact,
+    envStore,
+    gcp: gcpProvider,
+  }) => {
+    const region: string = deploymentConfig.region ?? "us-central1";
+    const containerPort: number = deploymentConfig.containerPort ?? 8080;
+    const cpu: string = deploymentConfig.cpu ?? "1";
+    const memory: string = deploymentConfig.memory ?? "512Mi";
+    const minInstances: number = deploymentConfig.minInstances ?? 0;
+    const maxInstances: number = deploymentConfig.maxInstances ?? 100;
+    const concurrency: number | undefined = deploymentConfig.concurrency;
+    const cpuIdle: boolean = deploymentConfig.cpuIdle ?? true;
+    const startupCpuBoost: boolean = deploymentConfig.startupCpuBoost ?? true;
+    const ingress = deploymentConfig.ingress as
+      | { rules?: Array<{ host: string; path: string }> }
+      | undefined;
+
+    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
+
+    const containerImage =
+      buildArtifact?.artifact?.uri ??
+      "us-docker.pkg.dev/cloudrun/container/hello";
+
+    // Resolved env vars for THIS app component, supplied by the orchestrator
+    // from the TSC's components.<name>.env after $[[...]] interpolation.
+    const envForComponent = (envStore?.[name] ?? {}) as Record<string, string>;
+    const envEntries = Object.entries(envForComponent).map(([k, v]) => ({
+      name: k,
+      value: v,
+    }));
+
+    // Cloud Run v2 rejects cpu < 1 with always-allocated CPU.
+    const cpuFractional = parseFloat(cpu) < 1;
+    const effectiveCpuIdle = cpuFractional || cpuIdle;
+    const effectiveStartupCpuBoost = cpuFractional ? false : startupCpuBoost;
+
+    const service = new gcp.cloudrunv2.Service(
+      $`service-${name}`,
+      {
+        location: region,
+        ingress: "INGRESS_TRAFFIC_ALL",
+        template: {
+          maxInstanceRequestConcurrency: concurrency as any,
+          scaling: {
+            minInstanceCount: minInstances,
+            maxInstanceCount: maxInstances,
+          },
+          containers: [
+            {
+              image: containerImage,
+              resources: {
+                limits: { cpu, memory },
+                cpuIdle: effectiveCpuIdle,
+                startupCpuBoost: effectiveStartupCpuBoost,
+              },
+              ports: {
+                name: "http1",
+                containerPort,
+              } as any,
+              envs: envEntries.length > 0 ? envEntries : undefined,
+            },
+          ],
+        },
+      },
+      gcpOpts,
+    );
+
+    // Allow unauthenticated access (public service)
+    new gcp.cloudrunv2.ServiceIamMember(
+      $`public-invoker-${name}`,
+      {
+        location: region,
+        name: service.name,
+        role: "roles/run.invoker",
+        member: "allUsers",
+      },
+      gcpOpts,
+    );
+
+    const ingressHosts = (ingress?.rules ?? []).map((r) => r.host);
+
+    if (!(state as any).allocations) {
+      (state as any).allocations = {};
+    }
+    (state as any).allocations[name] = {
+      serviceName: service.name,
+      region,
+      serviceUri: service.uri,
+      ingressHosts,
     };
   },
 
