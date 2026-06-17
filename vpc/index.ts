@@ -82,7 +82,10 @@ const component = new InfraComponent({
 // ---- GCloud Provider Implementation ----
 
 component.implement(CloudProvider.gcloud, {
-  pulumi: async ({ $, inputs }) => {
+  pulumi: async ({ $, inputs, gcp: gcpProvider }) => {
+    const gcpOpts: import("@pulumi/pulumi").CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
     const {
       region,
       routingMode,
@@ -115,7 +118,7 @@ component.implement(CloudProvider.gcloud, {
       enableUlaInternalIpv6: enableUlaInternalIpv6,
       internalIpv6Range: internalIpv6Range,
       description: "VPC network managed by sdlc.works",
-    });
+    }, gcpOpts);
 
     // 2. Conditionally create Router + NAT
     let router: gcp.compute.Router | undefined;
@@ -126,7 +129,7 @@ component.implement(CloudProvider.gcloud, {
         network: vpc.id,
         region: region,
         bgp: { asn: routerAsn },
-      });
+      }, gcpOpts);
 
       nat = new gcp.compute.RouterNat($`nat`, {
         router: router.name,
@@ -136,7 +139,7 @@ component.implement(CloudProvider.gcloud, {
         logConfig: enableNatLogging
           ? { enable: true, filter: natLogFilter }
           : undefined,
-      });
+      }, gcpOpts);
     }
 
     // 3. Conditionally create internal firewall
@@ -150,7 +153,7 @@ component.implement(CloudProvider.gcloud, {
           { protocol: "udp", ports: ["0-65535"] },
         ],
         description: "Allow internal traffic between instances",
-      });
+      }, gcpOpts);
     }
 
     // 4. Return outputs

@@ -97,7 +97,10 @@ const component = new InfraComponent({
 // ---- GCloud Provider Implementation ----
 
 component.implement(CloudProvider.gcloud, {
-  pulumi: async ({ $, inputs }) => {
+  pulumi: async ({ $, inputs, gcp: gcpProvider }) => {
+    const gcpOpts: import("@pulumi/pulumi").CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
     const {
       protocol,
       loadBalancingScheme,
@@ -122,7 +125,8 @@ component.implement(CloudProvider.gcloud, {
           {
             managed: { domains: [domain] },
             description: "Managed SSL certificate by sdlc.works",
-          }
+          },
+          gcpOpts,
         );
         managedCerts.push(cert);
       }
@@ -144,7 +148,7 @@ component.implement(CloudProvider.gcloud, {
         pathMatcher: hr.pathMatcher,
       })),
       description: "URL map managed by sdlc.works",
-    });
+    }, gcpOpts);
 
     // 3. Create target proxies based on protocol
     let httpsProxy: gcp.compute.TargetHttpsProxy | undefined;
@@ -160,14 +164,14 @@ component.implement(CloudProvider.gcloud, {
         urlMap: urlMap.id,
         sslCertificates: certRefs,
         description: "HTTPS proxy managed by sdlc.works",
-      });
+      }, gcpOpts);
     }
 
     if (protocol === "HTTP" || protocol === "BOTH") {
       httpProxy = new gcp.compute.TargetHttpProxy($`http-proxy`, {
         urlMap: urlMap.id,
         description: "HTTP proxy managed by sdlc.works",
-      });
+      }, gcpOpts);
     }
 
     // 4. Create static IP if requested
@@ -177,7 +181,7 @@ component.implement(CloudProvider.gcloud, {
         ipVersion: ipVersion,
         networkTier: networkTier,
         description: "Static IP managed by sdlc.works",
-      });
+      }, gcpOpts);
     }
 
     // 5. Create forwarding rules
@@ -193,7 +197,8 @@ component.implement(CloudProvider.gcloud, {
           ipAddress: staticIp?.address,
           loadBalancingScheme: loadBalancingScheme,
           networkTier: networkTier,
-        }
+        },
+        gcpOpts,
       );
     }
 
@@ -206,7 +211,8 @@ component.implement(CloudProvider.gcloud, {
           ipAddress: staticIp?.address,
           loadBalancingScheme: loadBalancingScheme,
           networkTier: networkTier,
-        }
+        },
+        gcpOpts,
       );
     }
 

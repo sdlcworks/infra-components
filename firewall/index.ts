@@ -74,7 +74,10 @@ const component = new InfraComponent({
 // ---- GCloud Provider Implementation ----
 
 component.implement(CloudProvider.gcloud, {
-  pulumi: async ({ $, inputs }) => {
+  pulumi: async ({ $, inputs, gcp: gcpProvider }) => {
+    const gcpOpts: import("@pulumi/pulumi").CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
     const {
       networkId,
       direction,
@@ -112,7 +115,7 @@ component.implement(CloudProvider.gcloud, {
       logConfig:
         enableLogging && logConfig ? { metadata: logConfig.metadata } : undefined,
       description: "Firewall rule managed by sdlc.works",
-    });
+    }, gcpOpts);
 
     return {
       id: firewall.id,

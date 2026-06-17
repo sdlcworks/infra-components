@@ -105,7 +105,10 @@ const component = new InfraComponent({
 // ---- GCloud Provider Implementation ----
 
 component.implement(CloudProvider.gcloud, {
-  pulumi: async ({ $, inputs }) => {
+  pulumi: async ({ $, inputs, gcp: gcpProvider }) => {
+    const gcpOpts: import("@pulumi/pulumi").CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
     const {
       networkId,
       region,
@@ -145,7 +148,7 @@ component.implement(CloudProvider.gcloud, {
             }
           : undefined,
       description: "Subnet managed by sdlc.works",
-    });
+    }, gcpOpts);
 
     return {
       id: subnet.id,

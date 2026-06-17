@@ -17,6 +17,7 @@ const registry = new ArtifactRegistry({
   provision: async ({ config, state, $, gcp }) => {
     if (!gcp) throw new Error("gcp-artifact-registry requires gcloud provider");
 
+    const gcpOpts = gcp ? { provider: gcp } : {};
     new gcp.artifactregistry.Repository($`repo`, {
       location: config.location,
       repositoryId: config.repositoryId,
@@ -25,7 +26,7 @@ const registry = new ArtifactRegistry({
       ...(config.immutableTags
         ? { dockerConfig: { immutableTags: true } }
         : {}),
-    });
+    }, gcpOpts);
 
     state.location = config.location;
     state.repositoryId = config.repositoryId;
