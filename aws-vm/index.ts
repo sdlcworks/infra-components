@@ -21,6 +21,7 @@ import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
+  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as aws from "@pulumi/aws";
@@ -308,7 +309,7 @@ const component = new InfraComponent({
           "(e.g. instanceType resize). Does not map to an AWS API field directly.",
       ),
   }),
-  appComponentTypes: {},
+  appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
     instanceId: z.string().describe("EC2 instance ID"),
     name: z.string().describe("Instance name (derived from $ naming)"),

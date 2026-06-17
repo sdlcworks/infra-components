@@ -4,6 +4,7 @@ import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
+  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
@@ -75,7 +76,7 @@ const component = new InfraComponent({
       memory: "512Mi",
     }),
   }),
-  appComponentTypes: {},
+  appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
     id: z.string(),
     name: z.string(),

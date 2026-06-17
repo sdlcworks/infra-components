@@ -20,6 +20,7 @@ import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
+  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
@@ -287,7 +288,7 @@ const component = new InfraComponent({
       .default("RUNNING")
       .describe("Desired VM status. Set to TERMINATED to stop without destroying. In-place update."),
   }),
-  appComponentTypes: {},
+  appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
     instanceId: z.string().describe("GCE instance ID"),
     selfLink: z.string().describe("GCE instance self-link (globally unique resource URI)"),

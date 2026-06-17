@@ -7,6 +7,7 @@ import {
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
+  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
@@ -241,7 +242,7 @@ const component = new InfraComponent({
       "Cloudflare Worker bindings (R2, KV, D1, Queues, Services)"
     ),
   }),
-  appComponentTypes: {},
+  appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
     id: z.string(),
     name: z.string(),

@@ -56,6 +56,7 @@ import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
+  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as hcloud from "@pulumi/hcloud";
@@ -234,7 +235,7 @@ const component = new InfraComponent({
         "Whether to try shutting the server down gracefully before deleting it.",
       ),
   }),
-  appComponentTypes: {},
+  appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
     serverId: z.string().describe("Hetzner server ID"),
     name: z.string().describe("Server name (derived from $ naming)"),
