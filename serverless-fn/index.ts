@@ -7,7 +7,6 @@ import {
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
-  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
@@ -23,7 +22,13 @@ import {
   CloudRunJobHTTPCI,
   HTTPPublicCI,
   R2BucketCI,
+  PublicCI,
 } from "../_internal/interfaces";
+
+import {
+  mintGcpAccessToken,
+  waitForCloudRunOperation,
+} from "../_internal/gcp-helpers";
 
 // ---- Default Placeholder Worker Script ----
 
@@ -158,6 +163,20 @@ const CloudflarePlacementSchema = z.object({
 
 const CloudflareLimitsSchema = z.object({
   cpuMs: z.number().min(5).max(30000).default(50),
+});
+
+// ---- Per-App-Component Schemas (dezite allocation model) ----
+
+const IngressRuleSchema = z.object({
+  host: z.string(),
+  path: z.string().default("/"),
+});
+
+const AllocationSchema = z.object({
+  serviceName: z.string(),
+  region: z.string(),
+  serviceUri: z.string(),
+  ingressHosts: z.array(z.string()).default([]),
 });
 
 // ---- Component Definition ----
