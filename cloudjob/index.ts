@@ -297,6 +297,115 @@ component.implement(CloudProvider.gcloud, {
       },
     }),
   ],
+
+  upsertArtifacts: async ({ buildArtifacts, state, getCredentials, envStore }) => {
+    const componentEntries = Object.entries(buildArtifacts);
+    if (componentEntries.length === 0) {
+      console.error("No artifacts to deploy");
+      return;
+    }
+
+    const creds = (getCredentials() as Record<string, string>) || {};
+    const projectId = creds.GCP_PROJECT_ID;
+    const saKey = creds.GCP_SERVICE_ACCOUNT_KEY;
+    if (!projectId || !saKey) {
+      throw new Error(
+        "cloudjob(gcloud): GCP_PROJECT_ID and GCP_SERVICE_ACCOUNT_KEY must be present in cloud_credentials.gcloud",
+      );
+    }
+
+    const accessToken = await mintGcpAccessToken(saKey);
+
+    // Cloud Run Jobs v2 API
+    const jobName = state.jobName;
+    const location = state.location;
+    const jobUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${location}/jobs/${jobName}`;
+
+    // GET the current job configuration
+    const getResponse = await fetch(jobUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!getResponse.ok) {
+      const errorText = await getResponse.text();
+      throw new Error(
+        `cloudjob(gcloud): failed to get job '${jobName}' (${getResponse.status}): ${errorText}`,
+      );
+    }
+
+    const jobConfig = (await getResponse.json()) as any;
+
+    // Update the container image in the template
+    // Cloud Run Jobs have double-nested template: template.template.containers[]
+    if (!jobConfig.template?.template?.containers?.[0]) {
+      throw new Error(
+        `cloudjob(gcloud): job '${jobName}' has unexpected structure: missing template.template.containers[0]`,
+      );
+    }
+
+    const containerImage = componentEntries[0][1].artifact.uri;
+    jobConfig.template.template.containers[0].image = containerImage;
+
+    // Merge environment variables from envStore
+    const envVarsFromStore: Record<string, string> = {};
+    for (const componentEnv of Object.values(envStore)) {
+      for (const [key, value] of Object.entries(componentEnv)) {
+        envVarsFromStore[key] = value;
+      }
+    }
+
+    if (Object.keys(envVarsFromStore).length > 0) {
+      const existingEnvs: Array<{ name: string; value?: string; valueSource?: any }> =
+        jobConfig.template.template.containers[0].env || [];
+
+      for (const [name, value] of Object.entries(envVarsFromStore)) {
+        const existing = existingEnvs.find((e: any) => e.name === name);
+        if (existing) {
+          existing.value = value;
+          delete existing.valueSource;
+        } else {
+          existingEnvs.push({ name, value });
+        }
+      }
+
+      jobConfig.template.template.containers[0].env = existingEnvs;
+      console.error(
+        `  Set ${Object.keys(envVarsFromStore).length} environment variable(s)`,
+      );
+    }
+
+    console.error(
+      `Deploying ${containerImage} → cloudjob/${jobName} in ${location}`,
+    );
+
+    // PATCH the job with the updated image and env vars
+    const patchResponse = await fetch(jobUrl, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(jobConfig),
+    });
+
+    if (!patchResponse.ok) {
+      const errorText = await patchResponse.text();
+      throw new Error(
+        `cloudjob(gcloud): failed to update job '${jobName}' (${patchResponse.status}): ${errorText}`,
+      );
+    }
+
+    // PATCH returns a Long-Running Operation — poll until completion
+    const operation = (await patchResponse.json()) as { name?: string; done?: boolean };
+    if (operation.name && !operation.done) {
+      console.error(
+        `  Waiting for job template to be updated (operation: ${operation.name})...`,
+      );
+      await waitForCloudRunOperation(operation.name, accessToken);
+    }
+
+    console.error(`Successfully deployed ${containerImage} to ${jobName}`);
+  },
 });
 
 export default component;
