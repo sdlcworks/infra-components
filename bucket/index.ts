@@ -127,7 +127,13 @@ const component = new InfraComponent({
     r2Location: R2Location.optional(),
     r2StorageClass: R2StorageClass.optional(),
   }),
-  appComponentTypes: defaultAppComponentType(z.object({})),
+  appComponentTypes: {
+    "default": z.object({}),
+    "bucket": z.object({
+      name: z.string(),
+      publicAccess: z.boolean().default(false),
+    }),
+  },
   outputSchema: z.object({
     id: z.string(),
     name: z.string(),
