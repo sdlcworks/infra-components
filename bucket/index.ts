@@ -290,7 +290,6 @@ component.implement(CloudProvider.cloudflare, {
     $,
     state,
     getCredentials,
-    cloudflare: cfProvider,
   }) => {
     const creds = (getCredentials() as Record<string, string>) || {};
     const accountId = creds.CLOUDFLARE_ACCOUNT_ID;
@@ -300,10 +299,6 @@ component.implement(CloudProvider.cloudflare, {
         "bucket(cloudflare): CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be present in cloud_credentials.cloudflare",
       );
     }
-
-    const cfOpts: pulumi.CustomResourceOptions = cfProvider
-      ? { provider: cfProvider }
-      : {};
 
     // Resolve R2 perm group IDs by name at provision time. The Pulumi
     // cloudflare data source only knows the /user/ endpoint, which 403s for
@@ -384,7 +379,7 @@ component.implement(CloudProvider.cloudflare, {
       (state as any).r2SecretAccessKey = secret;
     }
 
-    return {};
+    return {} as any;
   },
 
   // Per-target: create the R2 bucket and (optional) public managed domain.
