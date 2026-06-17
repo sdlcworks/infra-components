@@ -616,59 +616,79 @@ component.implement(CloudProvider.gcloud, {
     };
   },
 
-  connect: (({ state, gcp: gcpProvider }: any) => {
-    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
-      ? { provider: gcpProvider }
-      : {};
-
-    return [
-      connectionHandler({
-        interface: InternalServiceCI,
-        handler: async ({ $, connectionData }: any) => {
-          // Grant the connecting service's service account permission to invoke this service
-          if (connectionData.serviceAccountEmail) {
-            new gcp.cloudrunv2.ServiceIamMember(
-              $`iam-invoker`,
-              {
-                location: state.region,
-                name: state.serviceName,
-                role: "roles/run.invoker",
-                member: pulumi.interpolate`serviceAccount:${connectionData.serviceAccountEmail}`,
-              },
-              gcpOpts,
-            );
-          }
-
-          return {
-            uri: state.serviceUri,
-            metadata: {
-              serviceName: state.serviceName,
-              port: connectionData.port,
+  connect: ({ state, selfComponentName }: any) => [
+    connectionHandler({
+      interface: InternalServiceCI,
+      handler: async (_ctx: any) => {
+        const allocations = (state.allocations ?? {}) as Record<string, any>;
+        const a = allocations[selfComponentName];
+        if (!a) {
+          throw new Error(
+            `serverless-fn(gcloud): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
+          );
+        }
+        return {
+          uri: a.serviceUri,
+          metadata: {
+            uri: a.serviceUri,
+            serviceName: a.serviceName,
+          },
+        };
+      },
+    }),
+    connectionHandler({
+      interface: CloudRunServiceHTTPCI,
+      handler: async (_ctx: any) => {
+        return {
+          uri: state.serviceUri,
+          metadata: {
+            method: "POST" as const,
+            serviceName: state.serviceName,
+            location: state.region,
+            project: state.project,
+            auth: {
+              type: "service_account_key" as const,
+              serviceAccountEmail: state.httpTriggerSaEmail,
+              serviceAccountKeyJson: state.httpTriggerSaKeyJson,
             },
-          };
-        },
-      }),
-      connectionHandler({
-        interface: CloudRunServiceHTTPCI,
-        handler: async (_ctx: any) => {
-          return {
-            uri: state.serviceUri,
-            metadata: {
-              method: "POST" as const,
-              serviceName: state.serviceName,
-              location: state.region,
-              project: state.project,
-              auth: {
-                type: "service_account_key" as const,
-                serviceAccountEmail: state.httpTriggerSaEmail,
-                serviceAccountKeyJson: state.httpTriggerSaKeyJson,
-              },
-            },
-          };
-        },
-      }),
-    ];
-  }),
+          },
+        };
+      },
+    }),
+    connectionHandler({
+      interface: PublicCI,
+      handler: async (_ctx: any) => {
+        const allocations = (state.allocations ?? {}) as Record<string, any>;
+        const a = allocations[selfComponentName];
+        if (!a) {
+          throw new Error(
+            `serverless-fn(gcloud): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
+          );
+        }
+        const host = pulumi
+          .output(a.serviceUri)
+          .apply((u: string) => {
+            if (!u) return "";
+            try {
+              return new URL(u).hostname;
+            } catch {
+              return "";
+            }
+          });
+        return {
+          uri: a.serviceUri,
+          metadata: {
+            appComponentType: "http-service",
+            host,
+            serviceName: pulumi.output(a.serviceName),
+            region: a.region,
+            protocol: "https" as const,
+            port: 443,
+          },
+        };
+      },
+    }),
+  ],
 });
 
 // ---- Cloudflare Provider Implementation ----
