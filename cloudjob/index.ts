@@ -106,7 +106,7 @@ component.implement(CloudProvider.gcloud, {
   }),
   initialState: {},
 
-  pulumi: async ({ $, inputs, state, buildArtifacts, getCredentials }) => {
+  pulumi: async ({ $, inputs, state, buildArtifacts, getCredentials, gcp: gcpProvider }) => {
     const {
       region,
       taskCount,
@@ -118,6 +118,10 @@ component.implement(CloudProvider.gcloud, {
       secretEnvironmentVariables,
       resources,
     } = inputs;
+
+    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
 
     // Get container image from buildArtifacts (first component being deployed)
     const componentEntries = Object.entries(buildArtifacts);
@@ -133,7 +137,7 @@ component.implement(CloudProvider.gcloud, {
     const serviceAccount = new gcp.serviceaccount.Account($`service-account`, {
       accountId: $`sa`,
       displayName: "Service account for Cloud Run job",
-    });
+    }, gcpOpts);
 
     // Build environment variables
     const envVars = [
@@ -187,16 +191,16 @@ component.implement(CloudProvider.gcloud, {
         },
       },
       description: "Cloud Run Job managed by sdlc.works",
-    });
+    }, gcpOpts);
 
     // Get GCP project from credentials
-    const project = getCredentials().project;
+    const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
 
     // Create dedicated service account for HTTP triggering
     const httpTriggerSa = new gcp.serviceaccount.Account($`http-trigger-sa`, {
       accountId: $`http-sa`,
       displayName: "Service account for HTTP triggering of Cloud Run job",
-    });
+    }, gcpOpts);
 
     // Grant the HTTP trigger SA permission to invoke the job
     new gcp.cloudrunv2.JobIamMember($`http-trigger-iam`, {
@@ -204,12 +208,20 @@ component.implement(CloudProvider.gcloud, {
       name: job.name,
       role: "roles/run.invoker",
       member: pulumi.interpolate`serviceAccount:${httpTriggerSa.email}`,
-    });
+    }, gcpOpts);
+
+    // Grant the HTTP trigger SA permission to run with overrides (env vars, args)
+    new gcp.cloudrunv2.JobIamMember($`http-trigger-iam-developer`, {
+      location: region,
+      name: job.name,
+      role: "roles/run.developer",
+      member: pulumi.interpolate`serviceAccount:${httpTriggerSa.email}`,
+    }, gcpOpts);
 
     // Create a key for the HTTP trigger SA
     const httpTriggerSaKey = new gcp.serviceaccount.Key($`http-trigger-sa-key`, {
       serviceAccountId: httpTriggerSa.name,
-    });
+    }, gcpOpts);
 
     // Store Pulumi Output references in state for connection handlers
     // These carry dependency information, so resources that use them will automatically depend on the job
