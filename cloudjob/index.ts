@@ -4,13 +4,18 @@ import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
-  defaultAppComponentType,
+  DeploymentArtifactType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
 import * as pulumi from "@pulumi/pulumi";
 
 import { ServiceAccountCI, CloudRunJobHTTPCI } from "../_internal/interfaces";
+
+import {
+  mintGcpAccessToken,
+  waitForCloudRunOperation,
+} from "../_internal/gcp-helpers";
 
 // ---- Zod Enums for Config Options ----
 
