@@ -269,122 +269,196 @@ component.implement(CloudProvider.gcloud, {
 
 component.implement(CloudProvider.cloudflare, {
   stateSchema: z.object({
-    bucketName: z.string(),
-    accountId: z.string(),
+    // Instance-level — set in pulumi(), shared by all bucket targets.
+    r2AccessKeyId: z.string().optional(),
+    r2SecretAccessKey: z.string().optional(),
+    // Per-target.
+    allocations: z.record(z.string(), z.object({
+      bucketName: z.string(),
+      accountId: z.string(),
+      publicUrl: z.string(),
+    })).default({}),
   }),
-  initialState: {},
+  initialState: { allocations: {} },
 
-  pulumi: async ({ $, inputs, state }) => {
-    const {
-      accountId,
-      jurisdiction,
-      r2Location,
-      r2StorageClass,
-      lifecycleRules,
-      corsRules,
-      forceDestroy,
-    } = inputs;
-
-    if (!accountId) {
-      throw new Error("accountId is required for Cloudflare provider");
+  // Per-instance: mint an account-scoped R2 API token using CLOUDFLARE_API_TOKEN
+  // from cloud_credentials. Permission group IDs are looked up by name at
+  // provision time (no hardcoding, no KV). R2 S3 keys derive from the token:
+  //   access_key_id     = token.id
+  //   secret_access_key = sha256_hex(token.value)
+  pulumi: async ({
+    $,
+    state,
+    getCredentials,
+    cloudflare: cfProvider,
+  }) => {
+    const creds = (getCredentials() as Record<string, string>) || {};
+    const accountId = creds.CLOUDFLARE_ACCOUNT_ID;
+    const apiToken = creds.CLOUDFLARE_API_TOKEN;
+    if (!accountId || !apiToken) {
+      throw new Error(
+        "bucket(cloudflare): CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN must be present in cloud_credentials.cloudflare",
+      );
     }
 
-    // Generate bucket name and store in state
-    const bucketName = $`bucket`;
-    state.bucketName = bucketName;
-    state.accountId = accountId;
+    const cfOpts: pulumi.CustomResourceOptions = cfProvider
+      ? { provider: cfProvider }
+      : {};
 
-    // Create R2 Bucket
-    const bucket = new cloudflare.R2Bucket(bucketName, {
-      accountId: accountId,
-      name: bucketName,
-      location: r2Location || "enam",
-      storageClass: r2StorageClass || "Standard",
-      jurisdiction: jurisdiction || "default",
-    });
+    // Resolve R2 perm group IDs by name at provision time. The Pulumi
+    // cloudflare data source only knows the /user/ endpoint, which 403s for
+    // account-scoped (cfat_) tokens. Hit the account endpoint directly.
+    const pgRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/tokens/permission_groups?scope=com.cloudflare.api.account`,
+      { headers: { Authorization: `Bearer ${apiToken}` } },
+    );
+    if (!pgRes.ok) {
+      const text = await pgRes.text();
+      throw new Error(
+        `bucket(cloudflare): failed to list permission groups (${pgRes.status}): ${text}`,
+      );
+    }
+    const pgJson = (await pgRes.json()) as {
+      result?: Array<{ id: string; name: string }>;
+    };
+    const allPgs = pgJson.result ?? [];
+    const findPgId = (name: string): string => {
+      const match = allPgs.find((p) => p.name === name);
+      if (!match) {
+        throw new Error(
+          `bucket(cloudflare): permission group '${name}' not found in account-scoped catalogue (${allPgs.length} total)`,
+        );
+      }
+      return match.id;
+    };
+    const readPgId = findPgId("Workers R2 Storage Read");
+    const writePgId = findPgId("Workers R2 Storage Write");
 
-    // Create R2 Bucket Lifecycle if rules provided
-    if (lifecycleRules.length > 0) {
-      const r2LifecycleRules = lifecycleRules.map((rule) => {
-        // Map GCS lifecycle actions to R2
-        let action: string;
-        if (rule.action.type === "Delete") {
-          action = "Expire";
-        } else if (rule.action.type === "SetStorageClass") {
-          action = "Transition";
-        } else if (rule.action.type === "AbortIncompleteMultipartUpload") {
-          action = "AbortIncompleteMultipartUpload";
-        } else {
-          throw new Error(`Unsupported lifecycle action for R2: ${rule.action.type}`);
-        }
-
-        return {
-          action: action,
-          enabled: true,
-          filter: {
-            prefix: rule.condition.matchesPrefix?.[0],
+    // The cloudflare.ApiToken Pulumi resource hits /user/tokens which 403s
+    // for account-scoped (cfat_) tokens. Mint via the account endpoint
+    // directly. Idempotency: if we already have an accessKeyId in state,
+    // skip the mint.
+    const existingId: string | undefined = (state as any).r2AccessKeyId;
+    if (!existingId) {
+      const tokenName = `${$`r2-token`}`;
+      const tokenRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/tokens`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiToken}`,
+            "Content-Type": "application/json",
           },
-          expiration: rule.condition.age
-            ? {
-                days: rule.condition.age,
-              }
-            : undefined,
-          transition:
-            action === "Transition"
-              ? {
-                  days: rule.condition.age || 30,
-                  storageClass: "InfrequentAccess",
-                }
-              : undefined,
-          abortIncompleteMultipartUpload:
-            action === "AbortIncompleteMultipartUpload"
-              ? {
-                  daysAfterInitiation: rule.condition.age || 7,
-                }
-              : undefined,
-        };
-      });
-
-      new cloudflare.R2BucketLifecycle(`${bucketName}-lifecycle`, {
-        accountId: accountId,
-        bucket: bucketName,
-        rules: r2LifecycleRules,
-      });
+          body: JSON.stringify({
+            name: tokenName,
+            policies: [
+              {
+                effect: "allow",
+                permission_groups: [{ id: readPgId }, { id: writePgId }],
+                resources: {
+                  [`com.cloudflare.api.account.${accountId}`]: "*",
+                },
+              },
+            ],
+          }),
+        },
+      );
+      if (!tokenRes.ok) {
+        const text = await tokenRes.text();
+        throw new Error(
+          `bucket(cloudflare): R2 token mint failed (${tokenRes.status}): ${text}`,
+        );
+      }
+      const tokenJson = (await tokenRes.json()) as {
+        result?: { id?: string; value?: string };
+      };
+      const t = tokenJson.result ?? {};
+      if (!t.id || !t.value) {
+        throw new Error(
+          `bucket(cloudflare): R2 token mint response missing fields: ${JSON.stringify(tokenJson)}`,
+        );
+      }
+      // R2 S3 secret = sha256_hex(token.value). Per Cloudflare R2 docs.
+      const secret = createHash("sha256").update(t.value).digest("hex");
+      (state as any).r2AccessKeyId = t.id;
+      (state as any).r2SecretAccessKey = secret;
     }
 
-    // Create R2 Bucket CORS if rules provided
-    if (corsRules.length > 0) {
-      const r2CorsRules = corsRules.map((rule) => ({
-        allowedOrigins: rule.origins,
-        allowedMethods: rule.methods,
-        allowedHeaders: rule.responseHeaders || [],
-        maxAgeSeconds: rule.maxAgeSeconds || 3600,
-      }));
+    return {};
+  },
 
-      new cloudflare.R2BucketCors(`${bucketName}-cors`, {
-        accountId: accountId,
-        bucket: bucketName,
-        corsRules: r2CorsRules,
-      });
+  // Per-target: create the R2 bucket and (optional) public managed domain.
+  allocateWithPulumiCtx: async ({
+    name,
+    deploymentConfig,
+    state,
+    $,
+    getCredentials,
+    cloudflare: cfProvider,
+  }) => {
+    const creds = (getCredentials() as Record<string, string>) || {};
+    const accountId = creds.CLOUDFLARE_ACCOUNT_ID;
+
+    const bucketName: string = deploymentConfig.name;
+    const publicAccess: boolean = deploymentConfig.publicAccess === true;
+
+    const cfOpts: pulumi.CustomResourceOptions = cfProvider
+      ? { provider: cfProvider }
+      : {};
+
+    const bucket = new cloudflare.R2Bucket(
+      $`r2-${name}`,
+      {
+        accountId,
+        name: bucketName,
+        location: "enam",
+      },
+      cfOpts,
+    );
+
+    let publicUrl: pulumi.Output<string> = pulumi.output("");
+    if (publicAccess) {
+      const managed = new cloudflare.R2ManagedDomain(
+        $`r2-pub-${name}`,
+        {
+          accountId,
+          bucketName,
+          enabled: true,
+        },
+        { dependsOn: [bucket], ...cfOpts },
+      );
+      publicUrl = pulumi.interpolate`https://${managed.domain}`;
     }
 
-    return {
-      id: bucket.id,
-      name: bucket.name,
-      url: pulumi.interpolate`https://${accountId}.r2.cloudflarestorage.com/${bucketName}`,
-      location: bucket.location,
-      storageClass: bucket.storageClass || "Standard",
+    if (!(state as any).allocations) {
+      (state as any).allocations = {};
+    }
+    (state as any).allocations[name] = {
+      bucketName,
+      accountId,
+      publicUrl,
     };
   },
 
-  connect: (({ state }: any) => [
+  connect: (({ state, selfComponentName }: any) => [
     connectionHandler({
       interface: R2BucketCI,
-      handler: async (ctx) => {
+      handler: async (_ctx: any) => {
+        const allocations = (state.allocations ?? {}) as Record<string, any>;
+        const a = allocations[selfComponentName];
+        if (!a) {
+          throw new Error(
+            `bucket(cloudflare): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
+          );
+        }
         return {
-          uri: pulumi.interpolate`r2://${state.bucketName}`,
+          uri: pulumi.interpolate`r2://${a.bucketName}`,
           metadata: {
-            bucketName: state.bucketName,
+            bucketName: a.bucketName,
+            accountId: a.accountId,
+            accessKeyId: state.r2AccessKeyId,
+            secretAccessKey: state.r2SecretAccessKey,
+            publicUrl: a.publicUrl ?? "",
           },
         };
       },
