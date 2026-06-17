@@ -103,8 +103,16 @@ component.implement(CloudProvider.gcloud, {
     // HTTP trigger SA credentials
     httpTriggerSaEmail: z.string(),
     httpTriggerSaKeyJson: z.string(),
+    // Per-app-component allocations
+    allocations: z.record(z.string(), z.object({
+      jobName: z.string(),
+      location: z.string(),
+      project: z.string(),
+      httpTriggerSaEmail: z.string(),
+      httpTriggerSaKeyJson: z.string(),
+    })).default({}),
   }),
-  initialState: {},
+  initialState: { allocations: {} },
 
   pulumi: async ({ $, inputs, state, buildArtifacts, getCredentials, gcp: gcpProvider }) => {
     const {
@@ -239,28 +247,21 @@ component.implement(CloudProvider.gcloud, {
     };
   },
 
-  connect: (({ state }: any) => [
-    connectionHandler({
-      interface: ServiceAccountCI,
-      handler: async (ctx) => {
-        new gcp.cloudrunv2.JobIamMember(`iam-${ctx.connectionType}`, {
-          location: state.location,
-          name: state.jobName,
-          role: "roles/run.invoker",
-          member: pulumi.interpolate`serviceAccount:${ctx.connectionData.email}`,
-        });
+  allocateWithPulumiCtx: async ({ name, state }: any) => {
+    if (!state.allocations) state.allocations = {};
+    state.allocations[name] = {
+      jobName: state.jobName,
+      location: state.location,
+      project: state.project,
+      httpTriggerSaEmail: state.httpTriggerSaEmail,
+      httpTriggerSaKeyJson: state.httpTriggerSaKeyJson,
+    };
+  },
 
-        return {
-          uri: pulumi.interpolate`cloudjob://${state.location}/${state.jobName}`,
-          metadata: {
-            role: "roles/run.invoker",
-          },
-        };
-      },
-    }),
+  connect: ({ state, selfComponentName }: any) => [
     connectionHandler({
       interface: CloudRunJobHTTPCI,
-      handler: async (ctx) => {
+      handler: async (_ctx: any) => {
         const apiUrl = pulumi.interpolate`https://run.googleapis.com/v2/projects/${state.project}/locations/${state.location}/jobs/${state.jobName}:run`;
 
         return {
@@ -279,7 +280,23 @@ component.implement(CloudProvider.gcloud, {
         };
       },
     }),
-  ]),
+    connectionHandler({
+      interface: ServiceAccountCI,
+      handler: async (_ctx: any) => {
+        // Per-consumer IAM binding cannot be auto-created in v2 (the
+        // consumer's identity is no longer plumbed through ctx.connectionData
+        // — that channel was removed). Consumers must use an SA with
+        // appropriate project-level Cloud Run job invoker access.
+        return {
+          uri: pulumi.interpolate`cloudjob://${state.location}/${state.jobName}`,
+          metadata: {
+            role: "roles/run.invoker",
+            email: undefined,
+          },
+        };
+      },
+    }),
+  ],
 });
 
 export default component;
