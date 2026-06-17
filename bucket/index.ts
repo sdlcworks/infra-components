@@ -149,10 +149,13 @@ const component = new InfraComponent({
 component.implement(CloudProvider.gcloud, {
   stateSchema: z.object({
     bucketName: z.string(),
+    allocations: z.record(z.string(), z.object({
+      bucketName: z.string(),
+    })).default({}),
   }),
-  initialState: {},
+  initialState: { allocations: {} },
 
-  pulumi: async ({ $, inputs, state }) => {
+  pulumi: async ({ $, inputs, state, gcp: gcpProvider }) => {
     const {
       location,
       storageClass,
@@ -166,6 +169,10 @@ component.implement(CloudProvider.gcloud, {
       labels,
       forceDestroy,
     } = inputs;
+
+    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
 
     // Generate bucket name and store in state for connection handlers
     const bucketName = $`bucket`;
@@ -214,7 +221,7 @@ component.implement(CloudProvider.gcloud, {
         : undefined,
       labels: labels,
       forceDestroy: forceDestroy,
-    });
+    }, gcpOpts);
 
     return {
       id: bucket.id,
@@ -226,28 +233,36 @@ component.implement(CloudProvider.gcloud, {
     };
   },
 
-  connect: (({ state }: any) => [
+  allocateWithPulumiCtx: async ({ name, state }: any) => {
+    if (!state.allocations) state.allocations = {};
+    state.allocations[name] = { bucketName: state.bucketName };
+  },
+
+  connect: ({ state, selfComponentName }: any) => [
     connectionHandler({
       interface: ServiceAccountCI,
-      handler: async (ctx) => {
+      handler: async (ctx: any) => {
+        const a = (state.allocations ?? {})[selfComponentName] ?? { bucketName: state.bucketName };
         const role =
           ctx.connectionType === "read"
             ? "roles/storage.objectViewer"
             : "roles/storage.objectAdmin";
 
-        new gcp.storage.BucketIAMMember(`iam-${ctx.connectionType}`, {
-          bucket: state.bucketName,
-          role: role,
-          member: pulumi.interpolate`serviceAccount:${ctx.connectionData.email}`,
-        });
+        // Per-consumer IAM binding cannot be auto-created in v2 (the
+        // consumer's identity is no longer plumbed through ctx.connectionData
+        // — that channel was removed). Consumers must use a service
+        // account with appropriate project-level GCS access.
 
         return {
-          uri: pulumi.interpolate`gs://${state.bucketName}`,
-          metadata: { role },
+          uri: pulumi.interpolate`gs://${a.bucketName}`,
+          metadata: {
+            role,
+            email: undefined,
+          },
         };
       },
     }),
-  ]),
+  ],
 });
 
 // ---- Cloudflare Provider Implementation ----
