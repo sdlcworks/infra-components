@@ -779,8 +779,13 @@ component.implement(CloudProvider.cloudflare, {
     scriptName: z.string(),
     accountId: z.string(),
     workerUri: z.string(),
+    allocations: z.record(z.string(), z.object({
+      scriptName: z.string(),
+      accountId: z.string(),
+      workerUri: z.string(),
+    })).default({}),
   }),
-  initialState: {},
+  initialState: { allocations: {} },
 
   pulumi: async ({
     $,
@@ -978,13 +983,19 @@ component.implement(CloudProvider.cloudflare, {
     };
   },
 
-  connect: (({ state }: any) => [
+  allocateWithPulumiCtx: async ({ name, state }: any) => {
+    if (!state.allocations) state.allocations = {};
+    state.allocations[name] = {
+      scriptName: state.scriptName,
+      accountId: state.accountId,
+      workerUri: state.workerUri,
+    };
+  },
+
+  connect: (({ state, selfComponentName }: any) => [
     connectionHandler({
       interface: ServiceBindingCI,
       handler: async (_ctx: any) => {
-        // When another worker connects to this one via service binding,
-        // the orchestrator will configure the binding on the connecting worker
-        // We return the TARGET worker's script name (this component's state)
         return {
           uri: pulumi.interpolate`service:${state.scriptName}`,
           metadata: {
@@ -996,7 +1007,6 @@ component.implement(CloudProvider.cloudflare, {
     connectionHandler({
       interface: HTTPPublicCI,
       handler: async (_ctx: any) => {
-        // Cloudflare Workers are public by default, no auth needed
         return {
           uri: state.workerUri,
           metadata: {
