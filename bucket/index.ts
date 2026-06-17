@@ -1,10 +1,10 @@
 import { z } from "zod";
+import { createHash } from "crypto";
 
 import {
   CloudProvider,
   InfraComponent,
   connectionHandler,
-  defaultAppComponentType,
 } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
