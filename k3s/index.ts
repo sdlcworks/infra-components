@@ -2430,7 +2430,7 @@ loki.write "grafana_cloud" {
         envVars,
       );
 
-      const patchRes = await k8sFetch(k8sServer, apiPath, tlsOpts, {
+      const patchRes = await k8sFetch(k8sServer, `${apiPath}?fieldManager=sdlc-deploy`, tlsOpts, {
         method: "PATCH",
         headers: { "Content-Type": "application/strategic-merge-patch+json" },
         body: JSON.stringify(patchBody),
