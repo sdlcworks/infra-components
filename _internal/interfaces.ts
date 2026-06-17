@@ -1,134 +1,137 @@
 import { z } from "zod";
 import { defineConnectionInterface } from "@sdlcworks/components";
 
-// ---- Connection Interfaces ----
+// Connection interfaces (CIs).
+//
+// v2 shape: input schema is always empty (`z.object({})`). The runtime
+// `declareConnectionInterfaces` channel that used to carry consumer-side data
+// to the producer's connect handler was removed in v2. All useful data now
+// flows the OTHER direction — producer → consumer — via the result schema,
+// which is what the producer's connect handler returns as `metadata`.
+//
+// Consumers reference these fields from their TSC env block, e.g.:
+//   "$[[backend.connection.storage-bucket.metadata.bucketName]]"
+
+// ---- Service Account ----
 
 /**
- * ServiceAccount connection interface
- * Allows components to reference and use GCP service accounts
- * 
- * Result metadata includes the IAM role that was granted
+ * Service-account identity exposed by an infra component (e.g., a bucket
+ * exposing the service-account it has authorized).
+ *
+ * Result fields are optional because some providers (e.g., Cloudflare R2)
+ * don't have a service-account model — handlers return what they have.
  */
 export const ServiceAccountCI = defineConnectionInterface(
   "service-account",
+  z.object({}),
   z.object({
-    email: z.string(),
+    email: z.string().optional(),
+    role: z.string().optional(),
   }),
-  z.object({
-    role: z.string(),
-  })
 );
 
+// ---- Internal Service ----
+
 /**
- * Internal Service connection interface
- * Enables direct VPC-to-VPC service communication between components
- * 
- * Result metadata includes service name and port
+ * VPC-internal service-to-service URI for an HTTP service.
+ * Used when a consumer talks to a producer over the internal network.
  */
 export const InternalServiceCI = defineConnectionInterface(
   "internal-service",
+  z.object({}),
   z.object({
-    internalUri: z.string(),
-    serviceName: z.string(),
-    port: z.number(),
+    uri: z.string(),
+    serviceName: z.string().optional(),
+    port: z.number().optional(),
     serviceAccountEmail: z.string().optional(),
   }),
-  z.object({
-    serviceName: z.string(),
-    port: z.number(),
-  })
 );
 
+// ---- Backend Service (Load Balancer) ----
+
 /**
- * Backend Service connection interface
- * Used when a component needs to be exposed through a load balancer
- * 
- * No result metadata - just the URI is sufficient
+ * Backend that an HTTP load-balancer can route to via a Serverless NEG.
+ * Producers expose their backend-service identity for the LB to bind.
  */
 export const BackendServiceCI = defineConnectionInterface(
   "backend-service",
+  z.object({}),
   z.object({
     backendServiceId: z.string(),
     negId: z.string(),
     region: z.string(),
-  })
+  }),
 );
 
+// ---- Service Binding (Cloudflare Workers) ----
+
 /**
- * Service Binding connection interface
- * Enables Cloudflare Workers to call other Workers via service bindings
- * 
- * Result metadata includes the target script name
+ * Cloudflare service-to-service binding. Consumer Worker references the
+ * target Worker's script name to set up a service binding.
  */
 export const ServiceBindingCI = defineConnectionInterface(
   "service-binding",
+  z.object({}),
   z.object({
     scriptName: z.string(),
     environment: z.string().optional(),
   }),
-  z.object({
-    scriptName: z.string(),
-  })
 );
 
+// ---- R2 Bucket ----
+
 /**
- * R2 Bucket connection interface
- * Enables Cloudflare Workers to bind to R2 buckets
- * 
- * Result metadata includes the bucket name
+ * Cloudflare R2 bucket access. Producer mints an account-scoped R2 token in
+ * its instance-level pulumi() and emits S3-compatible credentials here so
+ * consumers can read/write the bucket directly.
  */
 export const R2BucketCI = defineConnectionInterface(
   "r2-bucket",
-  z.object({
-    bucketName: z.string().optional(),
-    accountId: z.string(),
-  }),
+  z.object({}),
   z.object({
     bucketName: z.string(),
-  })
-);
-
-/**
- * D1 Database connection interface
- * Enables Cloudflare Workers to bind to D1 databases
- *
- * Result metadata includes the database ID for binding configuration
- */
-export const D1DatabaseCI = defineConnectionInterface(
-  "d1-database",
-  z.object({
-    databaseId: z.string(),
-    databaseName: z.string(),
+    accountId: z.string(),
+    accessKeyId: z.string().optional(),
+    secretAccessKey: z.string().optional(),
+    publicUrl: z.string().optional(),
   }),
-  z.object({
-    databaseId: z.string(),
-  })
 );
 
+// ---- HTTP Public (generic) ----
+
 /**
- * HTTP Public connection interface (Generic)
- * For components that expose simple public HTTP endpoints without special auth.
- * 
- * Used by: Cloudflare Workers (public by default)
- * 
- * Result metadata includes the HTTP method to use
+ * Public HTTP endpoint without provider-specific auth. Used by URL registers
+ * and Cloudflare Workers that expose simple public HTTP.
  */
 export const HTTPPublicCI = defineConnectionInterface(
   "http-public",
   z.object({}),
   z.object({
-    method: z.enum(["GET", "POST", "PUT", "DELETE"]),
-  })
+    method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional(),
+  }),
 );
 
+// ---- D1 Database (Cloudflare) ----
+
 /**
- * Cloud Run Job HTTP connection interface
- * For GCP Cloud Run Jobs accessible via public HTTPS API.
- * 
- * Creates a dedicated service account + key for HTTP triggering.
- * URI is the full Cloud Run Jobs API endpoint.
- * 
- * Result metadata includes job details and authentication credentials
+ * Cloudflare D1 database access. Used by the cloudflare-d1 infra component
+ * to expose database identity for worker bindings.
+ */
+export const D1DatabaseCI = defineConnectionInterface(
+  "d1-database",
+  z.object({}),
+  z.object({
+    databaseId: z.string(),
+    databaseName: z.string().optional(),
+  }),
+);
+
+// ---- Cloud Run Job (HTTP-triggerable) ----
+
+/**
+ * GCP Cloud Run Job triggerable over HTTPS. Producer creates a per-job
+ * service-account key during allocation and returns the trigger URL plus
+ * the credentials needed for the consumer to invoke the job.
  */
 export const CloudRunJobHTTPCI = defineConnectionInterface(
   "cloud-run-job-http",
@@ -143,17 +146,15 @@ export const CloudRunJobHTTPCI = defineConnectionInterface(
       serviceAccountEmail: z.string(),
       serviceAccountKeyJson: z.string(),
     }),
-  })
+  }),
 );
 
+// ---- Cloud Run Service (HTTP) ----
+
 /**
- * Cloud Run Service HTTP connection interface
- * For GCP Cloud Run Services accessible via public HTTPS.
- * 
- * Creates a dedicated service account + key for authenticated HTTP access.
- * URI is the service's public URL.
- * 
- * Result metadata includes service details and authentication credentials
+ * GCP Cloud Run Service accessible via authenticated HTTPS. Producer
+ * creates a per-service service-account key during allocation and returns
+ * the service URL plus the credentials needed for the consumer to invoke it.
  */
 export const CloudRunServiceHTTPCI = defineConnectionInterface(
   "cloud-run-service-http",
@@ -168,15 +169,15 @@ export const CloudRunServiceHTTPCI = defineConnectionInterface(
       serviceAccountEmail: z.string(),
       serviceAccountKeyJson: z.string(),
     }),
-  })
+  }),
 );
 
+// ---- Public (multi-protocol) ----
+
 /**
- * Public HTTP Connection Interface
- * For components that expose simple public HTTP endpoints.
- * Used by k3s and other infra components for external access.
- *
- * Result metadata includes the protocol to use when connecting.
+ * Richer public connection interface used by components that expose
+ * hosted app components publicly across protocols (http/tcp) and to carry
+ * postgres connection metadata. Used by k3s + serverless-fn (Cloud Run).
  */
 export const PublicCI = defineConnectionInterface(
   "public",
@@ -189,6 +190,8 @@ export const PublicCI = defineConnectionInterface(
     mode: z.enum(["plain", "tls", "mtls"]).optional(),
     // http-service
     protocol: z.enum(["http", "https"]).optional(),
+    serviceName: z.string().optional(),
+    region: z.string().optional(),
     auth: z.object({
       headers: z.record(z.string(), z.string()),
     }).optional(),
@@ -199,14 +202,12 @@ export const PublicCI = defineConnectionInterface(
   })
 );
 
+// ---- k3s Internal ----
+
 /**
- * k3s Internal Connection Interface
- * Enables in-cluster communication between app components hosted on the same k3s infra.
- * The connect handler resolves the k8s Service ClusterDNS URI
- * (<name>.<namespace>.svc.cluster.local:<port>) from state.allocations.
- * No input data needed — the handler looks up the allocation by selfComponentName.
- *
- * Result metadata includes the protocol and port for connecting.
+ * In-cluster HTTP communication between app components hosted on the same
+ * k3s infra. The producer's connect handler resolves the k8s Service
+ * ClusterDNS URI from its allocations.
  */
 export const K3sInternalCI = defineConnectionInterface(
   "k3s-internal",
