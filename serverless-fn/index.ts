@@ -201,6 +201,7 @@ const component = new InfraComponent({
     ServiceBindingCI,
     HTTPPublicCI,
     R2BucketCI,
+    PublicCI,
   ],
   configSchema: z.object({
     // Core (GCloud)
@@ -261,7 +262,24 @@ const component = new InfraComponent({
       "Cloudflare Worker bindings (R2, KV, D1, Queues, Services)"
     ),
   }),
-  appComponentTypes: defaultAppComponentType(z.object({})),
+  appComponentTypes: {
+    "http-service": z.object({
+      service: z.string().optional(),
+      region: z.string().default("us-central1"),
+      containerPort: z.number().default(8080),
+      cpu: z.string().default("1"),
+      memory: z.string().default("512Mi"),
+      minInstances: z.number().min(0).default(0),
+      maxInstances: z.number().min(1).default(100),
+      concurrency: z.number().min(1).optional(),
+      cpuIdle: z.boolean().default(true),
+      startupCpuBoost: z.boolean().default(true),
+      ingress: z.object({
+        rules: z.array(IngressRuleSchema).default([]),
+      }).optional(),
+    }),
+    "default": z.object({}),
+  },
   outputSchema: z.object({
     id: z.string(),
     name: z.string(),
