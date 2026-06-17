@@ -220,7 +220,7 @@ component.implement(CloudProvider.gcloud, {
     };
   },
 
-  connect: [
+  connect: (({ state }: any) => [
     connectionHandler({
       interface: ServiceAccountCI,
       handler: async (ctx) => {
@@ -230,18 +230,18 @@ component.implement(CloudProvider.gcloud, {
             : "roles/storage.objectAdmin";
 
         new gcp.storage.BucketIAMMember(`iam-${ctx.connectionType}`, {
-          bucket: ctx.state.bucketName,
+          bucket: state.bucketName,
           role: role,
           member: pulumi.interpolate`serviceAccount:${ctx.connectionData.email}`,
         });
 
         return {
-          uri: pulumi.interpolate`gs://${ctx.state.bucketName}`,
+          uri: pulumi.interpolate`gs://${state.bucketName}`,
           metadata: { role },
         };
       },
     }),
-  ],
+  ]),
 });
 
 // ---- Cloudflare Provider Implementation ----
@@ -356,22 +356,19 @@ component.implement(CloudProvider.cloudflare, {
     };
   },
 
-  connect: [
+  connect: (({ state }: any) => [
     connectionHandler({
       interface: R2BucketCI,
       handler: async (ctx) => {
-        // Workers connect to R2 via bindings configured on the Worker side
-        // Return bucket info that can be referenced in cfBindings config
-        // e.g., cfBindings.r2[0].bucketName = "${outputs.storage-bucket.name}"
         return {
-          uri: pulumi.interpolate`r2://${ctx.state.bucketName}`,
+          uri: pulumi.interpolate`r2://${state.bucketName}`,
           metadata: {
-            bucketName: ctx.state.bucketName,
+            bucketName: state.bucketName,
           },
         };
       },
     }),
-  ],
+  ]),
 });
 
 export default component;

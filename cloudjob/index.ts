@@ -219,19 +219,19 @@ component.implement(CloudProvider.gcloud, {
     };
   },
 
-  connect: [
+  connect: (({ state }: any) => [
     connectionHandler({
       interface: ServiceAccountCI,
       handler: async (ctx) => {
         new gcp.cloudrunv2.JobIamMember(`iam-${ctx.connectionType}`, {
-          location: ctx.state.location,
-          name: ctx.state.jobName,
+          location: state.location,
+          name: state.jobName,
           role: "roles/run.invoker",
           member: pulumi.interpolate`serviceAccount:${ctx.connectionData.email}`,
         });
 
         return {
-          uri: pulumi.interpolate`cloudjob://${ctx.state.location}/${ctx.state.jobName}`,
+          uri: pulumi.interpolate`cloudjob://${state.location}/${state.jobName}`,
           metadata: {
             role: "roles/run.invoker",
           },
@@ -241,27 +241,25 @@ component.implement(CloudProvider.gcloud, {
     connectionHandler({
       interface: CloudRunJobHTTPCI,
       handler: async (ctx) => {
-        // Full Cloud Run Jobs API endpoint
-        // POST https://run.googleapis.com/v2/projects/{PROJECT}/locations/{LOCATION}/jobs/{JOB}:run
-        const apiUrl = pulumi.interpolate`https://run.googleapis.com/v2/projects/${ctx.state.project}/locations/${ctx.state.location}/jobs/${ctx.state.jobName}:run`;
+        const apiUrl = pulumi.interpolate`https://run.googleapis.com/v2/projects/${state.project}/locations/${state.location}/jobs/${state.jobName}:run`;
 
         return {
           uri: apiUrl,
           metadata: {
             method: "POST" as const,
-            jobName: ctx.state.jobName,
-            location: ctx.state.location,
-            project: ctx.state.project,
+            jobName: state.jobName,
+            location: state.location,
+            project: state.project,
             auth: {
               type: "service_account_key" as const,
-              serviceAccountEmail: ctx.state.httpTriggerSaEmail,
-              serviceAccountKeyJson: ctx.state.httpTriggerSaKeyJson,
+              serviceAccountEmail: state.httpTriggerSaEmail,
+              serviceAccountKeyJson: state.httpTriggerSaKeyJson,
             },
           },
         };
       },
     }),
-  ],
+  ]),
 });
 
 export default component;
