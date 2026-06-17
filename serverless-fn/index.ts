@@ -689,6 +689,87 @@ component.implement(CloudProvider.gcloud, {
       },
     }),
   ],
+
+  upsertArtifacts: async ({ buildArtifacts, state, envStore, getCredentials }) => {
+    const componentEntries = Object.entries(buildArtifacts);
+    if (componentEntries.length === 0) {
+      console.error("No artifacts to deploy");
+      return;
+    }
+
+    const creds = (getCredentials() as Record<string, string>) || {};
+    const projectId = creds.GCP_PROJECT_ID;
+    const saKey = creds.GCP_SERVICE_ACCOUNT_KEY;
+    if (!projectId || !saKey) {
+      throw new Error(
+        "serverless-fn(gcloud): GCP_PROJECT_ID and GCP_SERVICE_ACCOUNT_KEY must be present in cloud_credentials.gcloud",
+      );
+    }
+
+    const accessToken = await mintGcpAccessToken(saKey);
+
+    const allocations = (state.allocations ?? {}) as Record<
+      string,
+      { serviceName: string; region: string }
+    >;
+
+    for (const [componentName, artifactInfo] of componentEntries) {
+      const allocation = allocations[componentName];
+      if (!allocation) {
+        console.error(
+          `Skipping ${componentName}: no allocation metadata found in state — was this component allocated via allocateWithPulumiCtx?`,
+        );
+        continue;
+      }
+
+      const { serviceName, region } = allocation;
+      const imageUri = artifactInfo.artifact.uri;
+      const envForComponent = envStore[componentName] ?? {};
+      const envEntries = Object.entries(envForComponent).map(([k, v]) => ({
+        name: k,
+        value: v,
+      }));
+
+      console.error(
+        `Deploying ${imageUri} → serverless-fn/${serviceName} in ${region} ` +
+          `(env keys: ${Object.keys(envForComponent).join(", ") || "<none>"})`,
+      );
+
+      const url =
+        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}` +
+        `?updateMask=template`;
+      const patchRes = await fetch(url, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          template: {
+            containers: [
+              {
+                image: imageUri,
+                env: envEntries,
+              },
+            ],
+          },
+        }),
+      });
+
+      if (!patchRes.ok) {
+        throw new Error(
+          `serverless-fn(gcloud): failed to patch service '${serviceName}' (${patchRes.status}): ${await patchRes.text()}`,
+        );
+      }
+
+      const op = (await patchRes.json()) as { name?: string; done?: boolean };
+      if (op.name && !op.done) {
+        await waitForCloudRunOperation(op.name, accessToken);
+      }
+
+      console.error(`Successfully deployed ${imageUri} to ${serviceName}`);
+    }
+  },
 });
 
 // ---- Cloudflare Provider Implementation ----
