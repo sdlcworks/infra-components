@@ -311,11 +311,210 @@ component.implement(CloudProvider.gcloud, {
   }),
   initialState: { allocations: {} },
 
-  // No-op: all Cloud Run resources are created per-app-component via
-  // allocateWithPulumiCtx below. A singleton service is unnecessary when
-  // every app component gets its own dedicated service.
-  pulumi: async () => {
-    return {};
+  pulumi: async ({
+    $,
+    inputs,
+    state,
+    buildArtifacts,
+    getCredentials,
+    gcp: gcpProvider,
+  }) => {
+    const {
+      region,
+      ingress,
+      vpcAccess,
+      containerPort,
+      environmentVariables,
+      secretEnvironmentVariables,
+      resources,
+      minScale,
+      maxScale,
+      maxConcurrency,
+      executionEnvironment,
+      requestTimeout,
+      startupTimeout,
+      sessionAffinity,
+      loadBalancerIntegration,
+    } = inputs;
+
+    // Default opts for all GCP resources — uses the explicit provider
+    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
+      ? { provider: gcpProvider }
+      : {};
+
+    // Get container image from buildArtifacts (first component being deployed)
+    const componentEntries = Object.entries(buildArtifacts);
+    const containerImage =
+      componentEntries.length > 0
+        ? componentEntries[0][1].artifact.uri
+        : "us-docker.pkg.dev/cloudrun/container/hello";
+
+    // Create service account
+    const serviceAccount = new gcp.serviceaccount.Account($`service-account`, {
+      accountId: $`sa`,
+      displayName: "Service account for Cloud Run service",
+    }, gcpOpts);
+
+    // Build environment variables
+    const envVars = [
+      ...environmentVariables.map((env) => ({
+        name: env.name,
+        value: env.value,
+      })),
+      ...secretEnvironmentVariables.map((env) => ({
+        name: env.name,
+        valueSource: {
+          secretKeyRef: {
+            secret: env.secretName,
+            version: env.version,
+          },
+        },
+      })),
+    ];
+
+    const service = new gcp.cloudrunv2.Service($`service`, {
+      location: region,
+      ingress: ingress,
+      template: {
+        executionEnvironment: executionEnvironment,
+        serviceAccount: serviceAccount.email,
+        sessionAffinity: sessionAffinity,
+        timeout: requestTimeout,
+        maxInstanceRequestConcurrency: maxConcurrency,
+        scaling: {
+          minInstanceCount: minScale,
+          maxInstanceCount: maxScale,
+        },
+        vpcAccess: vpcAccess
+          ? {
+              networkInterfaces: [
+                {
+                  subnetwork: vpcAccess.subnetId,
+                },
+              ],
+              egress: vpcAccess.egress,
+            }
+          : undefined,
+        containers: [
+          {
+            image: containerImage,
+            resources: {
+              limits: {
+                cpu: resources.cpu,
+                memory: resources.memory,
+              },
+              startupCpuBoost: true,
+            },
+            ports: [
+              {
+                name: "http1",
+                containerPort: containerPort,
+              },
+            ],
+            envs: envVars.length > 0 ? envVars : undefined,
+            startupProbe: startupTimeout
+              ? {
+                  timeoutSeconds: parseInt(startupTimeout),
+                  tcpSocket: {
+                    port: containerPort,
+                  },
+                }
+              : undefined,
+          },
+        ],
+      },
+    }, gcpOpts);
+
+    // Get GCP project from credentials (v2 credential shape)
+    const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
+
+    // Create dedicated service account for HTTP triggering
+    const httpTriggerSa = new gcp.serviceaccount.Account($`http-trigger-sa`, {
+      accountId: $`http-sa`,
+      displayName: "Service account for HTTP triggering of Cloud Run service",
+    }, gcpOpts);
+
+    // Grant the HTTP trigger SA permission to invoke the service
+    new gcp.cloudrunv2.ServiceIamMember($`http-trigger-iam`, {
+      location: region,
+      name: service.name,
+      role: "roles/run.invoker",
+      member: pulumi.interpolate`serviceAccount:${httpTriggerSa.email}`,
+    }, gcpOpts);
+
+    // Create a key for the HTTP trigger SA
+    const httpTriggerSaKey = new gcp.serviceaccount.Key($`http-trigger-sa-key`, {
+      serviceAccountId: httpTriggerSa.name,
+    }, gcpOpts);
+
+    // Store state for connection handlers
+    state.serviceName = service.name;
+    state.region = region;
+    state.project = project;
+    state.serviceUri = service.uri;
+    state.httpTriggerSaEmail = httpTriggerSa.email;
+    state.httpTriggerSaKeyJson = httpTriggerSaKey.privateKey;
+
+    // Track service account email + container port for connect + allocate handlers
+    state.serviceAccountEmail = serviceAccount.email;
+    state.containerPort = containerPort;
+
+    // Create Backend Service resources if load balancer integration enabled
+    let backendServiceId: any;
+    let negId: any;
+
+    if (loadBalancerIntegration?.enabled) {
+      // Create Serverless NEG pointing to Cloud Run
+      const neg = new gcp.compute.RegionNetworkEndpointGroup($`neg`, {
+        region: region,
+        networkEndpointType: "SERVERLESS",
+        cloudRun: {
+          service: service.name,
+        },
+      }, gcpOpts);
+
+      // Create Backend Service for external load balancer
+      const backendService = new gcp.compute.BackendService(
+        $`backend-service`,
+        {
+          protocol: "HTTP",
+          loadBalancingScheme: "EXTERNAL_MANAGED",
+          backends: [
+            {
+              group: neg.selfLink,
+              balancingMode: "UTILIZATION",
+              capacityScaler: 1.0,
+            },
+          ],
+        },
+        gcpOpts,
+      );
+
+      backendServiceId = backendService.selfLink;
+      negId = neg.selfLink;
+
+      state.backendServiceId = backendService.selfLink;
+      state.negId = neg.selfLink;
+
+      // Allow unauthenticated access through the load balancer
+      // The INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER setting ensures only LB traffic reaches the service
+      new gcp.cloudrunv2.ServiceIamMember($`lb-invoker`, {
+        location: region,
+        name: service.name,
+        role: "roles/run.invoker",
+        member: "allUsers",
+      }, gcpOpts);
+    }
+
+    return {
+      id: service.id,
+      name: service.name,
+      uri: service.uri,
+      latestReadyRevision: service.latestReadyRevision,
+      location: service.location,
+      backendServiceId: backendServiceId,
+      negId: negId,
+    };
   },
 
   allocateWithPulumiCtx: async ({
