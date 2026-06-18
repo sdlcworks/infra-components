@@ -12,6 +12,16 @@ import { defineConnectionInterface } from "@sdlcworks/components";
 // Consumers reference these fields from their TSC env block, e.g.:
 //   "$[[backend.connection.storage-bucket.metadata.bucketName]]"
 
+// ---- Postgres ----
+
+export const PostgresCI = defineConnectionInterface(
+  "postgres",
+  z.object({}),
+  z.object({
+    uri: z.string(),
+  }),
+);
+
 // ---- Service Account ----
 
 /**
