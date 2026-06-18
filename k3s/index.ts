@@ -6,7 +6,7 @@ import {
   connectionHandler,
   DeploymentArtifactType,
 } from "@sdlcworks/components";
-import { K3sInternalCI, PublicCI } from "../_internal/interfaces";
+import { K3sInternalCI, PublicCI, R2BucketCI } from "../_internal/interfaces";
 
 import * as gcp from "@pulumi/gcp";
 import * as pulumi from "@pulumi/pulumi";
@@ -510,6 +510,11 @@ const component = new InfraComponent({
       description:
         "allows internal postgres database access between app components via k8s Service DNS",
       interface: K3sInternalCI,
+    },
+    "r2-bucket": {
+      description:
+        "consumer-side: a K3s workload connects to a Cloudflare R2 bucket (metadata injected as env vars at deploy time)",
+      interface: R2BucketCI,
     },
   } as const,
   connectionInterfaces: [],
@@ -2514,7 +2519,7 @@ loki.write "grafana_cloud" {
           case "postgres":
             return {
               uri: pulumi.output(
-                `postgresql://${alloc.dbUser}:${alloc.dbPassword}@${clusterHost}:${alloc.servicePort ?? 5432}/${alloc.dbName}?sslmode=disable`,
+                `postgresql://${encodeURIComponent(alloc.dbUser ?? "")}:${encodeURIComponent(alloc.dbPassword ?? "")}@${clusterHost}:${alloc.servicePort ?? 5432}/${encodeURIComponent(alloc.dbName ?? "")}?sslmode=disable`,
               ),
               metadata: {
                 appComponentType: "postgres",
@@ -2598,7 +2603,7 @@ loki.write "grafana_cloud" {
             };
           case "postgres":
             return {
-              uri: pulumi.interpolate`postgresql://${alloc.dbUser}:${alloc.dbPassword}@${ip}:${alloc.servicePort ?? 5432}/${alloc.dbName}?sslmode=disable`,
+              uri: pulumi.interpolate`postgresql://${encodeURIComponent(alloc.dbUser ?? "")}:${encodeURIComponent(alloc.dbPassword ?? "")}@${ip}:${alloc.servicePort ?? 5432}/${encodeURIComponent(alloc.dbName ?? "")}?sslmode=disable`,
               metadata: {
                 appComponentType: "postgres",
                 host: ip,
