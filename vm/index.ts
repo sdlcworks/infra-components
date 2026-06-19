@@ -12,7 +12,7 @@
  * identical to the originals -- this is a port, not a rewrite.
  *
  * Config structure:
- *   8 common top-level fields + 3 optional provider sub-objects
+ *   9 common top-level fields + 3 optional provider sub-objects
  *   (hetzner, gcloud, aws). Experience layers render only the common
  *   fields + the sub-object matching the bound integration.
  */
@@ -154,66 +154,80 @@ const AwsEgressRuleSchema = z.object({
   description: z.string().optional(),
 });
 
-// ---- AWS Helper: buildUserData ----
+// ---- Cloud-Init Helper: buildUserData ----
 
 /**
- * Build a cloud-init user data string that injects SSH public keys.
- * If the user already provided userData, this wraps it as a multipart
- * cloud-init document. If not, it produces a minimal #cloud-config.
+ * Build a cloud-init user data string from up to three sources:
+ *   1. SSH public keys  (rendered as a text/cloud-config part)
+ *   2. Raw user data    (type auto-detected: cloud-config or x-shellscript)
+ *   3. Startup script   (rendered as a text/x-shellscript part)
  *
- * Returns empty string when there are no SSH keys and no user-provided userData.
+ * Returns:
+ *   - ""              when all inputs are empty
+ *   - raw content     when exactly one part exists (no MIME wrapping)
+ *   - MIME multipart  when two or more parts exist
  */
 function buildUserData(
   sshPublicKeys: string[],
   rawUserData: string,
+  startupScript: string,
 ): string {
-  if (sshPublicKeys.length === 0 && !rawUserData) {
+  // Accumulate parts as { contentType, body } pairs.
+  const parts: { contentType: string; body: string }[] = [];
+
+  // Part 1: SSH key injection as cloud-config.
+  if (sshPublicKeys.length > 0) {
+    const sshBlock = [
+      "#cloud-config",
+      "ssh_authorized_keys:",
+      ...sshPublicKeys.map((k) => `  - ${k}`),
+    ].join("\n");
+    parts.push({ contentType: "text/cloud-config", body: sshBlock });
+  }
+
+  // Part 2: User-provided userData (auto-detect type).
+  if (rawUserData) {
+    const detectedType = rawUserData.startsWith("#cloud-config")
+      ? "text/cloud-config"
+      : rawUserData.startsWith("#!/")
+        ? "text/x-shellscript"
+        : "text/cloud-config";
+    parts.push({ contentType: detectedType, body: rawUserData });
+  }
+
+  // Part 3: Startup script.
+  if (startupScript) {
+    parts.push({ contentType: "text/x-shellscript", body: startupScript });
+  }
+
+  // 0 parts -> empty string.
+  if (parts.length === 0) {
     return "";
   }
 
-  // If the user provided their own userData and there are no SSH keys to inject,
-  // pass it through unchanged.
-  if (sshPublicKeys.length === 0) {
-    return rawUserData;
+  // 1 part -> raw content, no MIME wrapping.
+  if (parts.length === 1) {
+    return parts[0].body;
   }
 
-  // Build a #cloud-config that injects SSH keys.
-  const sshBlock = [
-    "#cloud-config",
-    "ssh_authorized_keys:",
-    ...sshPublicKeys.map((k) => `  - ${k}`),
-  ].join("\n");
-
-  if (!rawUserData) {
-    return sshBlock;
-  }
-
-  // Both SSH keys and user-provided userData exist. Use MIME multipart
-  // to combine them so cloud-init processes both.
-  const parts = [
+  // 2+ parts -> MIME multipart document.
+  const mimeLines: string[] = [
     `Content-Type: multipart/mixed; boundary="${MULTIPART_BOUNDARY}"`,
     `MIME-Version: 1.0`,
     ``,
-    `--${MULTIPART_BOUNDARY}`,
-    `Content-Type: text/cloud-config; charset="utf-8"`,
-    `MIME-Version: 1.0`,
-    ``,
-    sshBlock,
-    ``,
-    `--${MULTIPART_BOUNDARY}`,
-    // Detect content type from the user's userData.
-    rawUserData.startsWith("#cloud-config")
-      ? `Content-Type: text/cloud-config; charset="utf-8"`
-      : rawUserData.startsWith("#!/")
-        ? `Content-Type: text/x-shellscript; charset="utf-8"`
-        : `Content-Type: text/cloud-config; charset="utf-8"`,
-    `MIME-Version: 1.0`,
-    ``,
-    rawUserData,
-    ``,
-    `--${MULTIPART_BOUNDARY}--`,
-  ].join("\n");
-  return parts;
+  ];
+  for (const part of parts) {
+    mimeLines.push(
+      `--${MULTIPART_BOUNDARY}`,
+      `Content-Type: ${part.contentType}; charset="utf-8"`,
+      `MIME-Version: 1.0`,
+      ``,
+      part.body,
+      ``,
+    );
+  }
+  mimeLines.push(`--${MULTIPART_BOUNDARY}--`);
+  return mimeLines.join("\n");
 }
 
 // ---- Component Definition ----
@@ -232,7 +246,7 @@ const component = new InfraComponent({
   } as const,
   connectionInterfaces: [],
   configSchema: z.object({
-    // ---- Common Fields (8) ----
+    // ---- Common Fields (9) ----
 
     machineSize: z
       .string()
@@ -275,6 +289,15 @@ const component = new InfraComponent({
       .describe(
         "Cloud-init user data (typically a #cloud-config YAML document). " +
           "Supported by all three providers.",
+      ),
+
+    startupScript: z
+      .string()
+      .optional()
+      .describe(
+        "Shell script to run on the VM at boot (e.g. #!/bin/bash ...). " +
+          "GCloud: mapped to metadata 'startup-script' (runs on every boot via guest agent). " +
+          "AWS/Hetzner: injected as a text/x-shellscript cloud-init part (runs on first boot by default).",
       ),
 
     assignPublicIp: z
@@ -369,11 +392,6 @@ const component = new InfraComponent({
         .string()
         .default("sdlc")
         .describe("Username for SSH keys in GCE metadata."),
-
-      startupScript: z
-        .string()
-        .optional()
-        .describe("GCE startup script (metadata 'startup-script'). Runs on every boot."),
 
       networkId: z
         .string()
@@ -620,9 +638,14 @@ component.implement(CloudProvider.hetzner, {
     const location = inputs.region;
     const image = (inputs.image as string) || "ubuntu-24.04";
     const sshPublicKeys = inputs.sshPublicKeys as string[];
-    const userData = inputs.userData;
+    const userData = inputs.userData as string;
+    const startupScript = (inputs.startupScript as string) ?? "";
     const labels = inputs.labels;
     const deleteProtection = inputs.deletionProtection;
+
+    // Build effective userData with startupScript merged via cloud-init.
+    // Empty SSH keys array: Hetzner handles SSH via hcloud.SshKey resources, not cloud-init.
+    const effectiveUserData = buildUserData([], userData, startupScript);
 
     // Hetzner-specific fields (from sub-object with defaults)
     const h = inputs.hetzner as any ?? {};
@@ -723,7 +746,7 @@ component.implement(CloudProvider.hetzner, {
       image: image as pulumi.Input<string>,
       location: location as pulumi.Input<string>,
       sshKeys: sshKeyNames.length > 0 ? sshKeyNames : undefined,
-      userData: userData as pulumi.Input<string | undefined>,
+      userData: (effectiveUserData || undefined) as pulumi.Input<string | undefined>,
       publicNets: publicNets,
       firewallIds: firewallId ? [firewallId] : undefined,
       labels: labels as pulumi.Input<Record<string, pulumi.Input<string>>>,
@@ -810,6 +833,7 @@ component.implement(CloudProvider.gcloud, {
     const zone = inputs.region;
     const sshPublicKeys = inputs.sshPublicKeys as string[];
     const userData = inputs.userData;
+    const startupScript = inputs.startupScript as string | undefined;
     const assignExternalIp = inputs.assignPublicIp;
     const labels = inputs.labels as Record<string, string>;
     const deletionProtection = inputs.deletionProtection;
@@ -821,7 +845,6 @@ component.implement(CloudProvider.gcloud, {
     const bootDiskSizeGb = g.bootDiskSizeGb;
     const bootDiskType = g.bootDiskType ?? "pd-balanced";
     const sshUser = g.sshUser ?? "sdlc";
-    const startupScript = g.startupScript;
     const networkId = g.networkId;
     const subnetId = g.subnetId;
     const networkTags = (g.networkTags ?? []) as string[];
@@ -848,7 +871,7 @@ component.implement(CloudProvider.gcloud, {
           `vm (gcloud): metadata key "${key}" is reserved. ` +
             `Use the dedicated config field instead ` +
             `(sshPublicKeys/gcloud.sshUser for "ssh-keys", userData for "user-data", ` +
-            `gcloud.startupScript for "startup-script").`,
+            `startupScript for "startup-script").`,
         );
       }
     }
@@ -1099,7 +1122,11 @@ component.implement(CloudProvider.aws, {
 
     // ---- Build effective userData with SSH key injection ----
 
-    const effectiveUserData = buildUserData(sshPublicKeys, userData);
+    const effectiveUserData = buildUserData(
+      sshPublicKeys,
+      userData,
+      (inputs.startupScript as string) ?? "",
+    );
 
     // ---- Merge tags with a component-managed Name tag ----
 
