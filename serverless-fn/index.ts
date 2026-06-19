@@ -316,6 +316,7 @@ component.implement(CloudProvider.gcloud, {
     inputs,
     state,
     buildArtifacts,
+    envStore,
     getCredentials,
     gcp: gcpProvider,
   }) => {
@@ -336,6 +337,35 @@ component.implement(CloudProvider.gcloud, {
       sessionAffinity,
       loadBalancerIntegration,
     } = inputs;
+
+    // When app components target this infra, allocateWithPulumiCtx creates
+    // per-app Cloud Run services. The singleton resources below are only
+    // needed when NO app components target this infra (standalone mode).
+    // Detect the per-app allocation case via buildArtifacts or envStore
+    // having entries — the orchestrator populates both for every app
+    // component with an active infra_target pointing here.
+    const hasAppComponentTargets =
+      Object.keys(buildArtifacts).length > 0 ||
+      Object.keys(envStore).length > 0;
+
+    if (hasAppComponentTargets) {
+      // Per-app allocation mode: allocateWithPulumiCtx handles all Cloud Run
+      // services. Skip singleton resources to avoid waste.
+      const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
+      state.region = region;
+      state.project = project;
+      state.containerPort = containerPort;
+      return {
+        id: "",
+        name: "",
+        uri: "",
+        latestReadyRevision: "",
+        location: region,
+      };
+    }
+
+    // Standalone mode: no app components target this infra, create the
+    // singleton Cloud Run service directly.
 
     // Default opts for all GCP resources — uses the explicit provider
     const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
