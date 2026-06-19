@@ -279,7 +279,6 @@ const component = new InfraComponent({
 
     assignPublicIp: z
       .boolean()
-      .default(true)
       .describe(
         "Create a stable public IP. " +
           "Hetzner: PrimaryIp (v4). GCloud: compute.Address. AWS: Elastic IP.",
