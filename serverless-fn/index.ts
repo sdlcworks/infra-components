@@ -23,6 +23,7 @@ import {
   HTTPPublicCI,
   R2BucketCI,
   PublicCI,
+  PostgresCI,
 } from "../_internal/interfaces";
 
 import {
@@ -191,6 +192,16 @@ const component = new InfraComponent({
     internal: {
       description: "allows internal VPC communication to this service",
       interface: InternalServiceCI,
+    },
+    postgres: {
+      description:
+        "consumer-side: a Cloud Run service connects to a Postgres database",
+      interface: PostgresCI,
+    },
+    "r2-bucket": {
+      description:
+        "consumer-side: a Cloud Run service connects to an R2 bucket",
+      interface: R2BucketCI,
     },
   } as const,
   connectionInterfaces: [
