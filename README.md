@@ -18,7 +18,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 | `subnet/` | GCP VPC subnet |
 | `firewall/` | GCP firewall rules |
 | `http-lb-external/` | GCP external HTTP(S) load balancer |
-| `bucket/` | GCP Cloud Storage / Cloudflare R2 bucket |
+| `bucket/` | GCP Cloud Storage / Cloudflare R2 / AWS S3 bucket |
 | `serverless-fn/` | GCP Cloud Run service + Cloudflare Workers |
 | `cloudjob/` | GCP Cloud Run Job |
 | `cloudflare-d1/` | Cloudflare D1 database |

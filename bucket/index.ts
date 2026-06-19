@@ -9,9 +9,10 @@ import {
 
 import * as gcp from "@pulumi/gcp";
 import * as cloudflare from "@pulumi/cloudflare";
+import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 
-import { ServiceAccountCI, R2BucketCI } from "../_internal/interfaces";
+import { ServiceAccountCI, R2BucketCI, S3BucketCI } from "../_internal/interfaces";
 
 // ---- Zod Enums for Config Options ----
 
@@ -80,7 +81,7 @@ const component = new InfraComponent({
       interface: ServiceAccountCI,
     },
   } as const,
-  connectionInterfaces: [R2BucketCI],
+  connectionInterfaces: [R2BucketCI, S3BucketCI],
   configSchema: z.object({
     // Core (GCloud)
     location: z
@@ -454,6 +455,363 @@ component.implement(CloudProvider.cloudflare, {
             accessKeyId: state.r2AccessKeyId,
             secretAccessKey: state.r2SecretAccessKey,
             publicUrl: a.publicUrl ?? "",
+          },
+        };
+      },
+    }),
+  ]),
+});
+
+// ---- AWS Provider Implementation ----
+
+const AWS_S3_EMPTY_PUBLIC_URL = "";
+const AWS_S3_DEFAULT_SSE_ALGORITHM = "AES256";
+const AWS_S3_KMS_SSE_ALGORITHM = "aws:kms";
+const AWS_S3_OBJECT_OWNERSHIP = "BucketOwnerEnforced";
+const AWS_S3_LIFECYCLE_STATUS_ENABLED = "Enabled";
+const AWS_S3_VERSIONING_STATUS_ENABLED = "Enabled";
+const AWS_POLICY_VERSION = "2012-10-17";
+const AWS_S3_PUBLIC_READ_ACTION = "s3:GetObject";
+const AWS_S3_PUBLIC_PRINCIPAL = "*";
+
+type BucketLifecycleRule = z.infer<typeof LifecycleRuleSchema>;
+type AwsLifecycleRule = aws.types.input.s3.BucketLifecycleConfigurationRule;
+
+function isPositiveAwsLifecycleDay(value: number | undefined): value is number {
+  return typeof value === "number" && value > 0;
+}
+
+function hasUnsupportedAwsLifecycleCondition(rule: BucketLifecycleRule): boolean {
+  const condition = rule.condition;
+  return Boolean(
+    condition.createdBefore ||
+      (condition.matchesSuffix && condition.matchesSuffix.length > 0) ||
+      condition.daysSinceCustomTime,
+  );
+}
+
+function awsLifecyclePrefixes(rule: BucketLifecycleRule): string[] {
+  const prefixes = rule.condition.matchesPrefix;
+  return prefixes && prefixes.length > 0 ? prefixes : [""];
+}
+
+function translateAwsLifecycleRules(
+  lifecycleRules: BucketLifecycleRule[],
+  versioningEnabled: boolean,
+): AwsLifecycleRule[] {
+  const translated: AwsLifecycleRule[] = [];
+
+  for (const [index, rule] of lifecycleRules.entries()) {
+    // Equivalent subset only. Skip cases that would require broadening scope
+    // or inventing an AWS-specific meaning:
+    // - SetStorageClass transitions (GCP and S3 storage-class enums differ)
+    // - createdBefore, matchesSuffix, daysSinceCustomTime
+    // - Delete rules without a positive age/current-days value
+    // - Noncurrent-version rules without versioning enabled or without
+    //   daysSinceNoncurrentTime
+    if (hasUnsupportedAwsLifecycleCondition(rule)) {
+      continue;
+    }
+
+    const prefixes = awsLifecyclePrefixes(rule);
+
+    for (const [prefixIndex, prefix] of prefixes.entries()) {
+      const idSuffix = prefixes.length > 1 ? `${index}-${prefixIndex}` : `${index}`;
+      const baseRule = {
+        id: `rule-${idSuffix}`,
+        status: AWS_S3_LIFECYCLE_STATUS_ENABLED,
+        filter: { prefix },
+      };
+
+      if (rule.action.type === "Delete") {
+        const isNoncurrentRule =
+          rule.condition.daysSinceNoncurrentTime !== undefined ||
+          rule.condition.withState === "ARCHIVED" ||
+          rule.condition.numNewerVersions !== undefined;
+
+        if (isNoncurrentRule) {
+          if (
+            !versioningEnabled ||
+            !isPositiveAwsLifecycleDay(rule.condition.daysSinceNoncurrentTime)
+          ) {
+            continue;
+          }
+
+          translated.push({
+            ...baseRule,
+            noncurrentVersionExpiration: {
+              noncurrentDays: rule.condition.daysSinceNoncurrentTime,
+              ...(isPositiveAwsLifecycleDay(rule.condition.numNewerVersions)
+                ? { newerNoncurrentVersions: rule.condition.numNewerVersions }
+                : {}),
+            },
+          });
+          continue;
+        }
+
+        if (!isPositiveAwsLifecycleDay(rule.condition.age)) {
+          continue;
+        }
+
+        translated.push({
+          ...baseRule,
+          expiration: {
+            days: rule.condition.age,
+          },
+        });
+        continue;
+      }
+
+      if (rule.action.type === "AbortIncompleteMultipartUpload") {
+        if (!isPositiveAwsLifecycleDay(rule.condition.age)) {
+          continue;
+        }
+
+        translated.push({
+          ...baseRule,
+          abortIncompleteMultipartUpload: {
+            daysAfterInitiation: rule.condition.age,
+          },
+        });
+      }
+    }
+  }
+
+  return translated;
+}
+
+component.implement(CloudProvider.aws, {
+  stateSchema: z.object({
+    config: z.object({
+      versioning: z.boolean().default(false),
+      lifecycleRules: z.array(LifecycleRuleSchema).default([]),
+      corsRules: z.array(CorsRuleSchema).default([]),
+      uniformBucketLevelAccess: UniformBucketLevelAccess.default(true).optional(),
+      publicAccessPrevention: PublicAccessPrevention.default("inherited").optional(),
+      encryptionKeyName: z.string().optional(),
+      labels: z.record(z.string(), z.string()).default({}),
+      forceDestroy: z.boolean().default(false),
+    }).optional(),
+    allocations: z.record(z.string(), z.object({
+      bucketName: z.string(),
+      region: z.string(),
+      arn: z.string(),
+      publicUrl: z.string(),
+    })).default({}),
+  }),
+  initialState: { allocations: {} },
+
+  pulumi: async ({ inputs, state }) => {
+    // No AWS resources are created at instance scope. The config snapshot is
+    // required because allocateWithPulumiCtx receives deploymentConfig but not
+    // component inputs in the current SDK.
+    (state as any).config = {
+      versioning: inputs.versioning,
+      lifecycleRules: inputs.lifecycleRules,
+      corsRules: inputs.corsRules,
+      uniformBucketLevelAccess: inputs.uniformBucketLevelAccess,
+      publicAccessPrevention: inputs.publicAccessPrevention,
+      encryptionKeyName: inputs.encryptionKeyName,
+      labels: inputs.labels,
+      forceDestroy: inputs.forceDestroy,
+    };
+
+    return {} as any;
+  },
+
+  allocateWithPulumiCtx: async ({
+    name,
+    deploymentConfig,
+    state,
+    $,
+    aws: provider,
+  }) => {
+    const config = (state as any).config as
+      | {
+          versioning: boolean;
+          lifecycleRules: BucketLifecycleRule[];
+          corsRules: Array<z.infer<typeof CorsRuleSchema>>;
+          uniformBucketLevelAccess?: boolean;
+          publicAccessPrevention?: "inherited" | "enforced";
+          encryptionKeyName?: string;
+          labels: Record<string, string>;
+          forceDestroy: boolean;
+        }
+      | undefined;
+
+    if (!config) {
+      throw new Error(
+        "bucket(aws): config snapshot missing from state; pulumi() must run before allocateWithPulumiCtx",
+      );
+    }
+
+    const configuredBucketName = deploymentConfig?.name as string | undefined;
+    const bucketName =
+      configuredBucketName && configuredBucketName.length > 0
+        ? configuredBucketName
+        : $`s3-${name}`;
+    const publicAccess = deploymentConfig?.publicAccess === true;
+
+    const awsOpts: pulumi.CustomResourceOptions = provider
+      ? { provider }
+      : {};
+
+    const bucket = new aws.s3.Bucket(
+      $`s3-${name}`,
+      {
+        bucket: bucketName,
+        forceDestroy: config.forceDestroy,
+        tags: config.labels,
+      },
+      awsOpts,
+    );
+
+    const ownershipControls = new aws.s3.BucketOwnershipControls(
+      $`s3-ownership-${name}`,
+      {
+        bucket: bucket.bucket,
+        rule: {
+          objectOwnership: AWS_S3_OBJECT_OWNERSHIP,
+        },
+      },
+      { ...awsOpts, dependsOn: [bucket] },
+    );
+
+    const publicAccessBlock = new aws.s3.BucketPublicAccessBlock(
+      $`s3-pab-${name}`,
+      {
+        bucket: bucket.bucket,
+        blockPublicAcls: true,
+        ignorePublicAcls: true,
+        blockPublicPolicy: !publicAccess,
+        restrictPublicBuckets: !publicAccess,
+      },
+      { ...awsOpts, dependsOn: [bucket] },
+    );
+
+    new aws.s3.BucketServerSideEncryptionConfiguration(
+      $`s3-sse-${name}`,
+      {
+        bucket: bucket.bucket,
+        rules: [
+          {
+            applyServerSideEncryptionByDefault: config.encryptionKeyName
+              ? {
+                  sseAlgorithm: AWS_S3_KMS_SSE_ALGORITHM,
+                  kmsMasterKeyId: config.encryptionKeyName,
+                }
+              : {
+                  sseAlgorithm: AWS_S3_DEFAULT_SSE_ALGORITHM,
+                },
+          },
+        ],
+      },
+      { ...awsOpts, dependsOn: [bucket] },
+    );
+
+    if (config.versioning) {
+      new aws.s3.BucketVersioning(
+        $`s3-versioning-${name}`,
+        {
+          bucket: bucket.bucket,
+          versioningConfiguration: {
+            status: AWS_S3_VERSIONING_STATUS_ENABLED,
+          },
+        },
+        { ...awsOpts, dependsOn: [bucket] },
+      );
+    }
+
+    if (config.corsRules.length > 0) {
+      new aws.s3.BucketCorsConfiguration(
+        $`s3-cors-${name}`,
+        {
+          bucket: bucket.bucket,
+          corsRules: config.corsRules.map((rule, index) => ({
+            id: `cors-${index}`,
+            allowedOrigins: rule.origins,
+            allowedMethods: rule.methods,
+            exposeHeaders: rule.responseHeaders,
+            maxAgeSeconds: rule.maxAgeSeconds,
+          })),
+        },
+        { ...awsOpts, dependsOn: [bucket] },
+      );
+    }
+
+    const lifecycleRules = translateAwsLifecycleRules(
+      config.lifecycleRules,
+      config.versioning,
+    );
+    if (lifecycleRules.length > 0) {
+      new aws.s3.BucketLifecycleConfiguration(
+        $`s3-lifecycle-${name}`,
+        {
+          bucket: bucket.bucket,
+          rules: lifecycleRules,
+        },
+        { ...awsOpts, dependsOn: [bucket] },
+      );
+    }
+
+    let publicUrl: pulumi.Output<string> = pulumi.output(AWS_S3_EMPTY_PUBLIC_URL);
+    if (publicAccess) {
+      new aws.s3.BucketPolicy(
+        $`s3-policy-${name}`,
+        {
+          bucket: bucket.bucket,
+          policy: bucket.arn.apply((arn) => JSON.stringify({
+            Version: AWS_POLICY_VERSION,
+            Statement: [
+              {
+                Sid: "PublicReadGetObject",
+                Effect: "Allow",
+                Principal: AWS_S3_PUBLIC_PRINCIPAL,
+                Action: AWS_S3_PUBLIC_READ_ACTION,
+                Resource: `${arn}/*`,
+              },
+            ],
+          })),
+        },
+        {
+          ...awsOpts,
+          dependsOn: [bucket, ownershipControls, publicAccessBlock],
+        },
+      );
+      publicUrl = pulumi.interpolate`https://${bucket.bucketRegionalDomainName}`;
+    }
+
+    if (!(state as any).allocations) {
+      (state as any).allocations = {};
+    }
+    (state as any).allocations[name] = {
+      bucketName,
+      region: bucket.bucketRegion,
+      arn: bucket.arn,
+      publicUrl,
+    };
+  },
+
+  connect: (({ state, selfComponentName }: any) => [
+    connectionHandler({
+      interface: S3BucketCI,
+      handler: async (_ctx: any) => {
+        const allocations = (state.allocations ?? {}) as Record<string, any>;
+        const a = allocations[selfComponentName];
+        if (!a) {
+          throw new Error(
+            `bucket(aws): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
+          );
+        }
+        return {
+          uri: pulumi.interpolate`s3://${a.bucketName}`,
+          metadata: {
+            bucketName: a.bucketName,
+            region: a.region,
+            arn: a.arn,
+            publicUrl: pulumi.output(a.publicUrl).apply((v) => v || undefined),
+            accessKeyId: undefined,
+            secretAccessKey: undefined,
           },
         };
       },

@@ -107,6 +107,27 @@ export const R2BucketCI = defineConnectionInterface(
   }),
 );
 
+// ---- S3 Bucket ----
+
+/**
+ * AWS S3 bucket access. Producer emits bucket coordinates for consumers
+ * that use ambient AWS IAM credentials (instance profile, task role, or
+ * equivalent). Long-lived access keys are reserved for a future explicit
+ * opt-in flow and are not populated by the bucket/aws implementation in v1.
+ */
+export const S3BucketCI = defineConnectionInterface(
+  "s3-bucket",
+  z.object({}),
+  z.object({
+    bucketName: z.string(),
+    region: z.string(),
+    arn: z.string(),
+    publicUrl: z.string().optional(),
+    accessKeyId: z.string().optional(),
+    secretAccessKey: z.string().optional(),
+  }),
+);
+
 // ---- HTTP Public (generic) ----
 
 /**
