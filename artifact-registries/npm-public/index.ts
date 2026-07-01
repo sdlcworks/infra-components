@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { execSync } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { ArtifactRegistry, DeploymentArtifactType } from "@sdlcworks/components";
+import { stampNpmTarball } from "../../_internal/stamp-npm-tarball";
 
 const registry = new ArtifactRegistry({
   acceptedArtifactTypes: [DeploymentArtifactType.file],
@@ -11,7 +12,7 @@ const registry = new ArtifactRegistry({
   provision: async () => {
     // No cloud resources needed — npmjs.com is external.
   },
-  publish: async ({ componentName, artifacts, version, getCredentials }) => {
+  publish: async ({ componentName, artifacts, version, publishVersion, getCredentials }) => {
     // npm publishes are one tarball per package version — a single registry
     // entry can't accept multiple labelled artifacts in one release. Reject
     // upfront rather than publishing a racy stream of same-version tarballs.
@@ -48,6 +49,18 @@ const registry = new ArtifactRegistry({
       );
     }
 
+    // When publishVersion is provided, stamp it into the tarball's
+    // package.json. Otherwise publish the tarball untouched (existing
+    // behaviour for components without retain_sdlc_version_string_info).
+    const effectiveVersion = publishVersion || version;
+    let tarballToPublish = artifact.uri;
+    let stampedTarball: string | undefined;
+
+    if (publishVersion) {
+      stampedTarball = stampNpmTarball(artifact.uri, publishVersion);
+      tarballToPublish = stampedTarball;
+    }
+
     const npmrcPath = join(tmpdir(), `.npmrc-sdlc-${Date.now()}`);
     writeFileSync(
       npmrcPath,
@@ -55,23 +68,42 @@ const registry = new ArtifactRegistry({
     );
 
     try {
+      // Derive --tag flag: when the effective version has a prerelease
+      // segment (e.g. "0.1.33-qa"), use the prerelease identifier as the
+      // dist-tag so branch publishes don't fight over "latest". When there
+      // is no prerelease (main branch, bare "0.1.33"), omit --tag so npm
+      // defaults to "latest".
+      let tagFlag = "";
+      if (publishVersion) {
+        const dashIdx = publishVersion.indexOf("-");
+        if (dashIdx !== -1) {
+          const prereleaseId = publishVersion.slice(dashIdx + 1);
+          tagFlag = ` --tag ${prereleaseId}`;
+        }
+      }
+
       execSync(
-        `npm publish ${artifact.uri} --registry https://registry.npmjs.org --userconfig ${npmrcPath}`,
+        `npm publish ${tarballToPublish} --registry https://registry.npmjs.org --userconfig ${npmrcPath}${tagFlag}`,
         { stdio: ["inherit", process.stderr, "inherit"] },
       );
       console.error(
-        `Published ${componentName}:${label} as ${packageName}@${version} to npmjs.com`,
+        `Published ${componentName}:${label} as ${packageName}@${effectiveVersion} to npmjs.com`,
       );
     } finally {
       try {
         unlinkSync(npmrcPath);
       } catch {}
+      if (stampedTarball) {
+        try {
+          rmSync(dirname(stampedTarball), { recursive: true, force: true });
+        } catch {}
+      }
     }
 
     return {
       artifacts: {
         [label]: {
-          uri: `https://www.npmjs.com/package/${packageName}/v/${version}`,
+          uri: `https://www.npmjs.com/package/${packageName}/v/${effectiveVersion}`,
         },
       },
     };

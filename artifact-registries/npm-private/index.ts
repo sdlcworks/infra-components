@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { execSync } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { ArtifactRegistry, DeploymentArtifactType } from "@sdlcworks/components";
+import { stampNpmTarball } from "../../_internal/stamp-npm-tarball";
 
 const registry = new ArtifactRegistry({
   acceptedArtifactTypes: [DeploymentArtifactType.file],
@@ -22,7 +23,7 @@ const registry = new ArtifactRegistry({
     state.project = config.project;
     state.scope = config.scope;
   },
-  publish: async ({ componentName, artifacts, version, state, getCredentials }) => {
+  publish: async ({ componentName, artifacts, version, publishVersion, state, getCredentials }) => {
     const labels = Object.keys(artifacts);
     if (labels.length !== 1) {
       throw new Error(
@@ -62,6 +63,15 @@ const registry = new ArtifactRegistry({
       );
     }
 
+    const effectiveVersion = publishVersion || version;
+    let tarballToPublish = artifact.uri;
+    let stampedTarball: string | undefined;
+
+    if (publishVersion) {
+      stampedTarball = stampNpmTarball(artifact.uri, publishVersion);
+      tarballToPublish = stampedTarball;
+    }
+
     const encodedPAT = Buffer.from(creds.AZURE_DEVOPS_PAT).toString("base64");
     const npmrcPath = join(tmpdir(), `.npmrc-sdlc-npmprivate-${Date.now()}`);
     writeFileSync(
@@ -78,17 +88,31 @@ const registry = new ArtifactRegistry({
     );
 
     try {
+      let tagFlag = "";
+      if (publishVersion) {
+        const dashIdx = publishVersion.indexOf("-");
+        if (dashIdx !== -1) {
+          const prereleaseId = publishVersion.slice(dashIdx + 1);
+          tagFlag = ` --tag ${prereleaseId}`;
+        }
+      }
+
       execSync(
-        `npm publish ${artifact.uri} --registry ${registryURL} --userconfig ${npmrcPath}`,
+        `npm publish ${tarballToPublish} --registry ${registryURL} --userconfig ${npmrcPath}${tagFlag}`,
         { stdio: ["inherit", process.stderr, "inherit"] },
       );
       console.error(
-        `Published ${componentName}:${label} as ${packageName}@${version} to '${feed}' (${creds.AZURE_DEVOPS_ORG}${project ? "/" + project : ""})`,
+        `Published ${componentName}:${label} as ${packageName}@${effectiveVersion} to '${feed}' (${creds.AZURE_DEVOPS_ORG}${project ? "/" + project : ""})`,
       );
     } finally {
       try {
         unlinkSync(npmrcPath);
       } catch {}
+      if (stampedTarball) {
+        try {
+          rmSync(dirname(stampedTarball), { recursive: true, force: true });
+        } catch {}
+      }
     }
 
     const feedPageBase = project
@@ -97,7 +121,7 @@ const registry = new ArtifactRegistry({
     return {
       artifacts: {
         [label]: {
-          uri: `${feedPageBase}/Npm/${encodeURIComponent(packageName)}/${version}`,
+          uri: `${feedPageBase}/Npm/${encodeURIComponent(packageName)}/${effectiveVersion}`,
         },
       },
     };
