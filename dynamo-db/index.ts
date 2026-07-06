@@ -96,6 +96,18 @@ function projectionPath(
   return `${kind}[${index}]`;
 }
 
+function isInteger(value: number) {
+  return Number.isInteger(value);
+}
+
+function isPositiveInteger(value: number) {
+  return isInteger(value) && value > 0;
+}
+
+function isOnDemandCap(value: number) {
+  return isInteger(value) && (value === -1 || value >= 1);
+}
+
 export const DynamoDbConfigSchema = z
   .object({
     name: z.string().default(""),
@@ -181,6 +193,65 @@ export const DynamoDbConfigSchema = z
       }
     }
 
+    const checkPositiveInteger = (
+      value: number | undefined,
+      path: (string | number)[],
+      label: string,
+    ) => {
+      if (value != null && !isPositiveInteger(value)) {
+        addIssue(ctx, path, `${label} must be a positive integer`);
+      }
+    };
+
+    const checkOnDemandCap = (
+      value: number | undefined,
+      path: (string | number)[],
+      label: string,
+    ) => {
+      if (value != null && !isOnDemandCap(value)) {
+        addIssue(
+          ctx,
+          path,
+          `${label} must be an integer greater than or equal to 1, or -1 to remove the cap`,
+        );
+      }
+    };
+
+    checkPositiveInteger(config.readCapacity, ["readCapacity"], "readCapacity");
+    checkPositiveInteger(config.writeCapacity, ["writeCapacity"], "writeCapacity");
+    checkOnDemandCap(
+      config.onDemandThroughput?.maxReadRequestUnits,
+      ["onDemandThroughput", "maxReadRequestUnits"],
+      "onDemandThroughput.maxReadRequestUnits",
+    );
+    checkOnDemandCap(
+      config.onDemandThroughput?.maxWriteRequestUnits,
+      ["onDemandThroughput", "maxWriteRequestUnits"],
+      "onDemandThroughput.maxWriteRequestUnits",
+    );
+    checkPositiveInteger(
+      config.warmThroughput?.readUnitsPerSecond,
+      ["warmThroughput", "readUnitsPerSecond"],
+      "warmThroughput.readUnitsPerSecond",
+    );
+    checkPositiveInteger(
+      config.warmThroughput?.writeUnitsPerSecond,
+      ["warmThroughput", "writeUnitsPerSecond"],
+      "warmThroughput.writeUnitsPerSecond",
+    );
+    if (
+      config.pointInTimeRecovery.recoveryPeriodInDays != null &&
+      (!isInteger(config.pointInTimeRecovery.recoveryPeriodInDays) ||
+        config.pointInTimeRecovery.recoveryPeriodInDays < 1 ||
+        config.pointInTimeRecovery.recoveryPeriodInDays > 35)
+    ) {
+      addIssue(
+        ctx,
+        ["pointInTimeRecovery", "recoveryPeriodInDays"],
+        "pointInTimeRecovery.recoveryPeriodInDays must be an integer between 1 and 35",
+      );
+    }
+
     if (config.localSecondaryIndexes.length > 0 && !config.rangeKey) {
       addIssue(
         ctx,
@@ -204,6 +275,13 @@ export const DynamoDbConfigSchema = z
           "writeCapacity is required when billingMode is PROVISIONED",
         );
       }
+      if (config.onDemandThroughput != null) {
+        addIssue(
+          ctx,
+          ["onDemandThroughput"],
+          "onDemandThroughput is only valid when billingMode is PAY_PER_REQUEST",
+        );
+      }
     } else {
       if (config.readCapacity != null) {
         addIssue(
@@ -222,6 +300,26 @@ export const DynamoDbConfigSchema = z
     }
 
     config.globalSecondaryIndexes.forEach((index, i) => {
+      checkPositiveInteger(
+        index.readCapacity,
+        ["globalSecondaryIndexes", i, "readCapacity"],
+        `globalSecondaryIndexes[${i}].readCapacity`,
+      );
+      checkPositiveInteger(
+        index.writeCapacity,
+        ["globalSecondaryIndexes", i, "writeCapacity"],
+        `globalSecondaryIndexes[${i}].writeCapacity`,
+      );
+      checkOnDemandCap(
+        index.onDemandThroughput?.maxReadRequestUnits,
+        ["globalSecondaryIndexes", i, "onDemandThroughput", "maxReadRequestUnits"],
+        `globalSecondaryIndexes[${i}].onDemandThroughput.maxReadRequestUnits`,
+      );
+      checkOnDemandCap(
+        index.onDemandThroughput?.maxWriteRequestUnits,
+        ["globalSecondaryIndexes", i, "onDemandThroughput", "maxWriteRequestUnits"],
+        `globalSecondaryIndexes[${i}].onDemandThroughput.maxWriteRequestUnits`,
+      );
       if (config.billingMode === "PROVISIONED") {
         if (index.readCapacity == null) {
           addIssue(
@@ -235,6 +333,13 @@ export const DynamoDbConfigSchema = z
             ctx,
             ["globalSecondaryIndexes", i, "writeCapacity"],
             `globalSecondaryIndexes[${i}].writeCapacity is required when billingMode is PROVISIONED`,
+          );
+        }
+        if (index.onDemandThroughput != null) {
+          addIssue(
+            ctx,
+            ["globalSecondaryIndexes", i, "onDemandThroughput"],
+            `globalSecondaryIndexes[${i}].onDemandThroughput is only valid when billingMode is PAY_PER_REQUEST`,
           );
         }
       } else {
@@ -310,6 +415,17 @@ export const DynamoDbConfigSchema = z
         "streamViewType is only valid when streamEnabled is true",
       );
     }
+    if (config.resourcePolicyJson.trim() !== "") {
+      try {
+        JSON.parse(config.resourcePolicyJson);
+      } catch {
+        addIssue(
+          ctx,
+          ["resourcePolicyJson"],
+          "resourcePolicyJson must be valid JSON",
+        );
+      }
+    }
   });
 
 export type DynamoDbConfig = z.infer<typeof DynamoDbConfigSchema>;
@@ -356,7 +472,11 @@ export function buildTableArgs(
         : undefined,
     streamEnabled: inputs.streamEnabled,
     streamViewType: inputs.streamEnabled ? inputs.streamViewType : undefined,
-    ttl: inputs.ttl,
+    ttl: inputs.ttl
+      ? inputs.ttl.enabled === false
+        ? { enabled: false }
+        : inputs.ttl
+      : undefined,
     pointInTimeRecovery: inputs.pointInTimeRecovery,
     serverSideEncryption: inputs.serverSideEncryption,
     tableClass: tableClassForPulumi(inputs.tableClass),

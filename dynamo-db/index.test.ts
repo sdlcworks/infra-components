@@ -190,6 +190,83 @@ describe("dynamo-db config validation", () => {
       }).success,
     ).toBe(true);
   });
+
+  test("validates disabled ttl and maps it without attributeName", () => {
+    const parsed = DynamoDbConfigSchema.parse({
+      ...baseConfig,
+      ttl: { attributeName: "expiresAt", enabled: false },
+    });
+    const args = buildTableArgs(parsed, "table");
+    expect(args.ttl).toEqual({ enabled: false });
+  });
+
+  test("rejects invalid numeric capacity and recovery values", () => {
+    expect(messagesFor({ ...baseConfig, onDemandThroughput: { maxReadRequestUnits: 0 } })).toContain(
+      "onDemandThroughput.maxReadRequestUnits must be an integer greater than or equal to 1, or -1 to remove the cap",
+    );
+    expect(messagesFor({ ...baseConfig, warmThroughput: { readUnitsPerSecond: 1.5 } })).toContain(
+      "warmThroughput.readUnitsPerSecond must be a positive integer",
+    );
+    expect(
+      messagesFor({
+        ...baseConfig,
+        pointInTimeRecovery: { enabled: true, recoveryPeriodInDays: 36 },
+      }),
+    ).toContain("pointInTimeRecovery.recoveryPeriodInDays must be an integer between 1 and 35");
+  });
+
+  test("enforces on-demand throughput compatibility with billing mode", () => {
+    expect(
+      messagesFor({
+        ...baseConfig,
+        billingMode: "PROVISIONED",
+        readCapacity: 5,
+        writeCapacity: 5,
+        onDemandThroughput: { maxReadRequestUnits: 100 },
+      }),
+    ).toContain("onDemandThroughput is only valid when billingMode is PAY_PER_REQUEST");
+
+    expect(
+      messagesFor({
+        billingMode: "PROVISIONED",
+        hashKey: "pk",
+        readCapacity: 5,
+        writeCapacity: 5,
+        attributes: [
+          { name: "pk", type: "S" },
+          { name: "gpk", type: "S" },
+        ],
+        globalSecondaryIndexes: [
+          {
+            name: "gsi1",
+            hashKey: "gpk",
+            projectionType: "ALL",
+            readCapacity: 5,
+            writeCapacity: 5,
+            onDemandThroughput: { maxReadRequestUnits: 100 },
+          },
+        ],
+      }),
+    ).toContain(
+      "globalSecondaryIndexes[0].onDemandThroughput is only valid when billingMode is PAY_PER_REQUEST",
+    );
+  });
+
+  test("validates non-empty resourcePolicyJson as JSON", () => {
+    expect(messagesFor({ ...baseConfig, resourcePolicyJson: "{not json" })).toContain(
+      "resourcePolicyJson must be valid JSON",
+    );
+
+    expect(
+      DynamoDbConfigSchema.safeParse({
+        ...baseConfig,
+        resourcePolicyJson: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [],
+        }),
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("dynamo-db resource mapping", () => {
