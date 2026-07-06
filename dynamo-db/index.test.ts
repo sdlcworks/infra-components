@@ -205,7 +205,10 @@ describe("dynamo-db config validation", () => {
       "onDemandThroughput.maxReadRequestUnits must be an integer greater than or equal to 1, or -1 to remove the cap",
     );
     expect(messagesFor({ ...baseConfig, warmThroughput: { readUnitsPerSecond: 1.5 } })).toContain(
-      "warmThroughput.readUnitsPerSecond must be a positive integer",
+      "warmThroughput.readUnitsPerSecond must be an integer greater than or equal to 12000",
+    );
+    expect(messagesFor({ ...baseConfig, warmThroughput: { writeUnitsPerSecond: 3999 } })).toContain(
+      "warmThroughput.writeUnitsPerSecond must be an integer greater than or equal to 4000",
     );
     expect(
       messagesFor({

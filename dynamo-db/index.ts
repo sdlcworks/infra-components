@@ -21,6 +21,8 @@ export const PULUMI_TABLE_CLASS_STANDARD_IA = "STANDARD_INFREQUENT_ACCESS";
 export const DEFAULT_PITR_ENABLED = true;
 export const DEFAULT_DELETION_PROTECTION = false;
 export const DYNAMO_URI_SCHEME = "dynamodb";
+export const MIN_WARM_READ_UNITS_PER_SECOND = 12000;
+export const MIN_WARM_WRITE_UNITS_PER_SECOND = 4000;
 
 const AttributeType = z.enum(["S", "N", "B"]);
 const BillingMode = z.enum(["PROVISIONED", "PAY_PER_REQUEST"]);
@@ -203,6 +205,21 @@ export const DynamoDbConfigSchema = z
       }
     };
 
+    const checkMinimumInteger = (
+      value: number | undefined,
+      minimum: number,
+      path: (string | number)[],
+      label: string,
+    ) => {
+      if (value != null && (!isInteger(value) || value < minimum)) {
+        addIssue(
+          ctx,
+          path,
+          `${label} must be an integer greater than or equal to ${minimum}`,
+        );
+      }
+    };
+
     const checkOnDemandCap = (
       value: number | undefined,
       path: (string | number)[],
@@ -229,13 +246,15 @@ export const DynamoDbConfigSchema = z
       ["onDemandThroughput", "maxWriteRequestUnits"],
       "onDemandThroughput.maxWriteRequestUnits",
     );
-    checkPositiveInteger(
+    checkMinimumInteger(
       config.warmThroughput?.readUnitsPerSecond,
+      MIN_WARM_READ_UNITS_PER_SECOND,
       ["warmThroughput", "readUnitsPerSecond"],
       "warmThroughput.readUnitsPerSecond",
     );
-    checkPositiveInteger(
+    checkMinimumInteger(
       config.warmThroughput?.writeUnitsPerSecond,
+      MIN_WARM_WRITE_UNITS_PER_SECOND,
       ["warmThroughput", "writeUnitsPerSecond"],
       "warmThroughput.writeUnitsPerSecond",
     );

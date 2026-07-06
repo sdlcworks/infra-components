@@ -1,5 +1,3 @@
-# SUBSYSTEM.md - DynamoDB Managed Table
-
 ## name
 
 dynamo-db
