@@ -12,9 +12,11 @@
  * identical to the originals -- this is a port, not a rewrite.
  *
  * Config structure:
- *   9 common top-level fields + 3 optional provider sub-objects
- *   (hetzner, gcloud, aws). Experience layers render only the common
- *   fields + the sub-object matching the bound integration.
+ *   Flat concept-first schema. Every field is named by what it IS
+ *   (e.g. bootDiskSizeGb, networkId, firewallRules), not by which
+ *   provider uses it. Provider applicability is documented in each
+ *   field's .describe() string. Provider-specific fields that do not
+ *   apply are silently ignored by the non-applicable implementations.
  */
 
 import { z } from "zod";
@@ -58,101 +60,57 @@ const RESERVED_METADATA_KEYS = ["ssh-keys", "user-data", "startup-script"] as co
 /** MIME boundary for cloud-init multipart (AWS SSH key injection). */
 const MULTIPART_BOUNDARY = "==SDLC_MULTIPART_BOUNDARY==";
 
-// ---- Zod Schemas: Hetzner Firewall Rules ----
+// ---- Zod Schema: Universal Firewall Rule ----
 
-const HetznerFirewallRuleSchema = z.object({
-  direction: z.enum(["in", "out"]),
-  protocol: z.enum(["tcp", "udp", "icmp", "gre", "esp"]),
+const FirewallRuleSchema = z.object({
+  direction: z.enum(["in", "out"]).describe(
+    'Traffic direction. "in" = ingress, "out" = egress. ' +
+      "GCloud: only ingress rules supported; egress rules silently ignored. " +
+      "AWS: ingress and egress split into separate Security Group rule sets.",
+  ),
+  protocol: z.string().describe(
+    'Protocol name or number. Common: "tcp", "udp", "icmp", "all", "-1". ' +
+      'Hetzner also supports "gre", "esp". AWS uses "-1" for all-protocols.',
+  ),
   port: z
     .string()
     .optional()
     .describe(
-      'Port or port range. Required for tcp/udp. Examples: "22", "80", "8000-9000", "any"',
-    ),
-  sourceIps: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'CIDRs allowed for inbound rules. Example: ["0.0.0.0/0", "::/0"]',
-    ),
-  destinationIps: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'CIDRs allowed for outbound rules. Example: ["0.0.0.0/0", "::/0"]',
-    ),
-  description: z.string().optional(),
-});
-
-// ---- Zod Schemas: GCloud Firewall Rules ----
-
-const GCloudFirewallRuleSchema = z.object({
-  protocol: z.enum(["tcp", "udp", "icmp", "all"]),
-  ports: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'Port or range. Required for tcp/udp. Examples: "22", "80", "8000-9000"',
+      'Port or port range string. Required for tcp/udp. Examples: "22", "80", "8000-9000", "any". ' +
+        "AWS: parsed to fromPort/toPort number pair. GCloud: wrapped in single-element array.",
     ),
   sourceRanges: z
     .array(z.string())
     .optional()
     .describe(
-      'CIDRs for inbound. Example: ["0.0.0.0/0"]. ' +
-        "NOTE: GCE aggregates sourceRanges across all rules into one firewall.",
-    ),
-  description: z.string().optional(),
-});
-
-// ---- Zod Schemas: AWS Firewall Rules ----
-
-const AwsIngressRuleSchema = z.object({
-  protocol: z
-    .string()
-    .describe(
-      '"tcp", "udp", "icmp", or "-1" for all protocols. ' +
-        "When -1, fromPort/toPort are ignored.",
-    ),
-  fromPort: z
-    .number()
-    .describe(
-      "Start of port range (inclusive). For ICMP: the ICMP type number.",
-    ),
-  toPort: z
-    .number()
-    .describe(
-      "End of port range (inclusive). For ICMP: the ICMP code number.",
-    ),
-  sourceRanges: z
-    .array(z.string())
-    .describe('Source CIDRs for inbound traffic. Example: ["0.0.0.0/0"].'),
-  description: z.string().optional(),
-});
-
-const AwsEgressRuleSchema = z.object({
-  protocol: z
-    .string()
-    .describe(
-      '"tcp", "udp", "icmp", or "-1" for all protocols. ' +
-        "When -1, fromPort/toPort are ignored.",
-    ),
-  fromPort: z
-    .number()
-    .describe(
-      "Start of port range (inclusive). For ICMP: the ICMP type number.",
-    ),
-  toPort: z
-    .number()
-    .describe(
-      "End of port range (inclusive). For ICMP: the ICMP code number.",
+      'Source CIDRs for ingress rules. Example: ["0.0.0.0/0", "::/0"]. ' +
+        "Hetzner: maps to sourceIps. GCloud: aggregated across rules. AWS: maps to cidrBlocks.",
     ),
   destinationRanges: z
     .array(z.string())
+    .optional()
     .describe(
-      'Destination CIDRs for outbound traffic. Example: ["0.0.0.0/0"].',
+      'Destination CIDRs for egress rules. Example: ["0.0.0.0/0", "::/0"]. ' +
+        "Hetzner: maps to destinationIps. AWS: maps to cidrBlocks. GCloud: not used.",
     ),
   description: z.string().optional(),
 });
+
+// ---- Helper: Parse port string to fromPort/toPort (for AWS) ----
+
+/**
+ * Parse a port string like "22", "8000-9000", or "any" into a
+ * { fromPort, toPort } pair suitable for AWS Security Group rules.
+ */
+function parsePortRange(port: string | undefined): { fromPort: number; toPort: number } {
+  if (!port || port === "any") return { fromPort: 0, toPort: 65535 };
+  if (port.includes("-")) {
+    const [from, to] = port.split("-").map(Number);
+    return { fromPort: from, toPort: to };
+  }
+  const p = Number(port);
+  return { fromPort: p, toPort: p };
+}
 
 // ---- Cloud-Init Helper: buildUserData ----
 
@@ -246,7 +204,7 @@ const component = new InfraComponent({
   } as const,
   connectionInterfaces: [],
   configSchema: z.object({
-    // ---- Common Fields (9) ----
+    // ---- Compute (2) ----
 
     machineSize: z
       .string()
@@ -264,15 +222,85 @@ const component = new InfraComponent({
           "WARNING: changing this value DESTROYS AND RECREATES the VM.",
       ),
 
+    // ---- Boot Image (5) ----
+
     image: z
       .string()
       .default("")
       .describe(
         "Direct image ID/name. When empty, provider-specific defaults apply: " +
           'Hetzner defaults to "ubuntu-24.04", GCloud uses imageFamily lookup, ' +
-          "AWS uses amiFilter lookup. " +
+          "AWS uses imageFilter lookup. " +
           "WARNING: changing this value DESTROYS AND RECREATES the VM.",
       ),
+
+    imageFamily: z
+      .string()
+      .default("ubuntu-2404-lts-amd64")
+      .describe(
+        "Boot disk image family for GCloud. Resolved once at creation. " +
+          "GCloud only. Other providers ignore this field.",
+      ),
+
+    imageProject: z
+      .string()
+      .default("ubuntu-os-cloud")
+      .describe(
+        "GCP project hosting the boot disk image family. " +
+          "GCloud only. Other providers ignore this field.",
+      ),
+
+    imageFilter: z
+      .string()
+      .default(DEFAULT_AMI_FILTER)
+      .describe(
+        "AMI name filter for automatic image resolution. Only used when image field is empty. " +
+          "AWS only. Other providers ignore this field.",
+      ),
+
+    imageFilterOwner: z
+      .string()
+      .default(DEFAULT_AMI_OWNER)
+      .describe(
+        "AWS account ID that owns the AMI matched by imageFilter. Only used when image is empty. " +
+          "AWS only. Other providers ignore this field.",
+      ),
+
+    // ---- Boot Disk (3) ----
+
+    bootDiskSizeGb: z
+      .number()
+      .min(8)
+      .max(65536)
+      .optional()
+      .describe(
+        "Boot/root disk size in GB. " +
+          "GCloud: boot disk size (min 10). AWS: root EBS volume size (default 20). " +
+          "Hetzner: not applicable (disk size is fixed per server type). " +
+          "WARNING: changing this value may DESTROY AND RECREATE the VM.",
+      ),
+
+    bootDiskType: z
+      .string()
+      .default("pd-balanced")
+      .describe(
+        "Boot/root disk type. " +
+          'GCloud: "pd-standard", "pd-balanced", "pd-ssd", "pd-extreme". ' +
+          'AWS: "gp3", "gp2", "io1", "io2". ' +
+          "Hetzner: not applicable. " +
+          "WARNING: changing this value may DESTROY AND RECREATE the VM.",
+      ),
+
+    bootDiskEncrypted: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Encrypt the root/boot disk. " +
+          "AWS: encrypts root EBS volume. WARNING: changing DESTROYS AND RECREATES. " +
+          "GCloud/Hetzner: not applicable (GCloud encrypts by default).",
+      ),
+
+    // ---- SSH Access (3) ----
 
     sshPublicKeys: z
       .array(z.string())
@@ -282,6 +310,26 @@ const component = new InfraComponent({
           "Injection mechanism is provider-specific: Hetzner creates hcloud.SshKey resources, " +
           "GCloud injects via instance metadata, AWS injects via cloud-init.",
       ),
+
+    sshUser: z
+      .string()
+      .default("sdlc")
+      .describe(
+        "Username for SSH key injection. " +
+          "GCloud: prefixed to each key in ssh-keys metadata. " +
+          "Hetzner/AWS: not used (SSH user is determined by the image).",
+      ),
+
+    keyPairName: z
+      .string()
+      .default("")
+      .describe(
+        "Name of an existing cloud key pair. " +
+          "AWS: EC2 Key Pair name. Does NOT create a key pair. " +
+          "GCloud/Hetzner: not applicable.",
+      ),
+
+    // ---- Initialization (3) ----
 
     userData: z
       .string()
@@ -300,12 +348,139 @@ const component = new InfraComponent({
           "AWS/Hetzner: injected as a text/x-shellscript cloud-init part (runs on first boot by default).",
       ),
 
+    instanceMetadata: z
+      .record(z.string(), z.string())
+      .default({})
+      .describe(
+        "Additional instance metadata (key-value pairs). " +
+          "GCloud: GCE instance metadata. Reserved keys (ssh-keys, user-data, startup-script) are rejected. " +
+          "Hetzner/AWS: not applicable.",
+      ),
+
+    // ---- Public Networking (4) ----
+
     assignPublicIp: z
       .boolean()
       .describe(
         "Create a stable public IP. " +
           "Hetzner: PrimaryIp (v4). GCloud: compute.Address. AWS: Elastic IP.",
       ),
+
+    ipv4Enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Enable public IPv4. " +
+          "Hetzner: when true, a stable PrimaryIp (v4) is created and attached. " +
+          "GCloud/AWS: not applicable (use assignPublicIp).",
+      ),
+
+    ipv6Enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Enable public IPv6. " +
+          "Hetzner: when true, a stable PrimaryIp (v6) is created and attached. " +
+          "GCloud/AWS: not applicable.",
+      ),
+
+    networkTier: z
+      .enum(["PREMIUM", "STANDARD"])
+      .default("PREMIUM")
+      .describe(
+        "Network tier for external IP. " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
+
+    // ---- Network Placement (2) ----
+
+    networkId: z
+      .string()
+      .optional()
+      .describe(
+        "VPC/network identifier. " +
+          "GCloud: VPC network self-link or ID. Omit for default network. " +
+          "AWS: VPC ID for Security Group. Omit for default VPC. " +
+          "Hetzner: not applicable.",
+      ),
+
+    subnetId: z
+      .string()
+      .optional()
+      .describe(
+        "Subnet identifier. " +
+          "GCloud: subnet self-link or ID. Omit for auto-select. " +
+          "AWS: EC2 subnet ID. Omit for default subnet. " +
+          "Hetzner: not applicable.",
+      ),
+
+    // ---- Network Policy (1) ----
+
+    firewallRules: z
+      .array(FirewallRuleSchema)
+      .default([])
+      .describe(
+        "Inline firewall rules using a universal shape. " +
+          "Hetzner: creates one hcloud.Firewall attached to this server. " +
+          "GCloud: creates one gcp.compute.Firewall (ingress only; egress rules ignored). " +
+          "AWS: creates Security Group ingress/egress rules (split by direction).",
+      ),
+
+    // ---- Network Config (2) ----
+
+    networkTags: z
+      .array(z.string())
+      .default([])
+      .describe(
+        "Network tags. " +
+          "GCloud: GCE network tags (firewall target tag is auto-added). " +
+          "Hetzner/AWS: not applicable.",
+      ),
+
+    canIpForward: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable IP forwarding. " +
+          "GCloud only. WARNING: DESTROYS AND RECREATES. " +
+          "Hetzner/AWS: not applicable.",
+      ),
+
+    // ---- Scheduling (4) ----
+
+    preemptible: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Use preemptible/spot VM. Forces automaticRestart=false, onHostMaintenance=TERMINATE. " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
+
+    automaticRestart: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Auto-restart on host failure. Forced false when preemptible=true. " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
+
+    onHostMaintenance: z
+      .enum(["MIGRATE", "TERMINATE"])
+      .default("MIGRATE")
+      .describe(
+        "Host maintenance behaviour. Forced TERMINATE when preemptible=true. " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
+
+    desiredStatus: z
+      .enum(["RUNNING", "TERMINATED"])
+      .default("RUNNING")
+      .describe(
+        "Desired VM status. TERMINATED stops without destroying. " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
+
+    // ---- Protection (3) ----
 
     deletionProtection: z
       .boolean()
@@ -315,6 +490,24 @@ const component = new InfraComponent({
           "Hetzner: deleteProtection. GCloud: deletionProtection. AWS: disableApiTermination.",
       ),
 
+    rebuildProtection: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable rebuild protection. " +
+          "Hetzner only. GCloud/AWS: not applicable.",
+      ),
+
+    keepDisk: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Do not resize disk when changing machineSize. Allows future downgrades. " +
+          "Hetzner only. GCloud/AWS: not applicable.",
+      ),
+
+    // ---- Labels (1) ----
+
     labels: z
       .record(z.string(), z.string())
       .default({})
@@ -323,239 +516,84 @@ const component = new InfraComponent({
           "Hetzner: labels. GCloud: labels. AWS: tags. In-place update on all providers.",
       ),
 
-    // ---- Hetzner-Specific Sub-Object ----
+    // ---- Security Hardening (4) ----
 
-    hetzner: z.object({
-      ipv4Enabled: z
-        .boolean()
-        .default(true)
-        .describe("Enable public IPv4. When true, a stable PrimaryIp is created and attached."),
+    secureBoot: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable Secure Boot (Shielded VM). " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
 
-      ipv6Enabled: z
-        .boolean()
-        .default(true)
-        .describe("Enable public IPv6. When true, a stable PrimaryIp is created and attached."),
+    virtualTpm: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable virtual TPM (Shielded VM). " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
 
-      firewallRules: z
-        .array(HetznerFirewallRuleSchema)
-        .default([])
-        .describe(
-          "Inline firewall rules. Creates one hcloud.Firewall attached to this server.",
-        ),
+    integrityMonitoring: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable integrity monitoring (Shielded VM). " +
+          "GCloud only. Hetzner/AWS: not applicable.",
+      ),
 
-      backups: z
-        .boolean()
-        .default(false)
-        .describe("Enable automatic backups."),
+    requireImdsv2: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Enforce Instance Metadata Service v2 (HttpTokens='required'). Security best practice. " +
+          "AWS only. GCloud/Hetzner: not applicable.",
+      ),
 
-      rebuildProtection: z
-        .boolean()
-        .default(false)
-        .describe("Enable rebuild protection. Hetzner-specific (no analogue on other providers)."),
+    // ---- IAM (2) ----
 
-      keepDisk: z
-        .boolean()
-        .default(false)
-        .describe("Do not resize disk when changing machineSize. Allows future downgrades."),
+    instanceProfileArn: z
+      .string()
+      .default("")
+      .describe(
+        "ARN of existing IAM instance profile. When set, component creates NO IAM resources. " +
+          "AWS only. GCloud/Hetzner: not applicable.",
+      ),
 
-      shutdownBeforeDeletion: z
-        .boolean()
-        .default(true)
-        .describe("Gracefully shut down before deleting."),
-    }).optional(),
+    enableSsmAccess: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Attach SSM managed policy to component-created IAM role. Only when instanceProfileArn is empty. " +
+          "AWS only. GCloud/Hetzner: not applicable.",
+      ),
 
-    // ---- GCloud-Specific Sub-Object ----
+    // ---- Operational (3) ----
 
-    gcloud: z.object({
-      imageFamily: z
-        .string()
-        .default("ubuntu-2404-lts-amd64")
-        .describe("Boot disk image family. Resolved once at creation."),
+    allowStoppingForUpdate: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Allow stopping VM for in-place updates (e.g. machineType/instanceType resize). " +
+          "GCloud: allowStoppingForUpdate on Instance. AWS: allows Pulumi to stop instance. " +
+          "Hetzner: not applicable.",
+      ),
 
-      imageProject: z
-        .string()
-        .default("ubuntu-os-cloud")
-        .describe("GCP project hosting the boot disk image family."),
+    shutdownBeforeDeletion: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Gracefully shut down before deleting. " +
+          "Hetzner only. GCloud/AWS: not applicable.",
+      ),
 
-      bootDiskSizeGb: z
-        .number()
-        .min(10)
-        .max(65536)
-        .describe("Boot disk size in GB. WARNING: DESTROYS AND RECREATES the VM."),
-
-      bootDiskType: z
-        .enum(["pd-standard", "pd-balanced", "pd-ssd", "pd-extreme"])
-        .default("pd-balanced")
-        .describe("Boot disk type. WARNING: DESTROYS AND RECREATES the VM."),
-
-      sshUser: z
-        .string()
-        .default("sdlc")
-        .describe("Username for SSH keys in GCE metadata."),
-
-      networkId: z
-        .string()
-        .optional()
-        .describe("VPC network self-link or ID. Omit for default network."),
-
-      subnetId: z
-        .string()
-        .optional()
-        .describe("Subnet self-link or ID. Omit for auto-select."),
-
-      networkTags: z
-        .array(z.string())
-        .default([])
-        .describe("GCE network tags."),
-
-      canIpForward: z
-        .boolean()
-        .default(false)
-        .describe("Enable IP forwarding. WARNING: DESTROYS AND RECREATES."),
-
-      networkTier: z
-        .enum(["PREMIUM", "STANDARD"])
-        .default("PREMIUM")
-        .describe("Network tier for external IP."),
-
-      firewallRules: z
-        .array(GCloudFirewallRuleSchema)
-        .describe(
-          "Inline INGRESS firewall rules. Creates one gcp.compute.Firewall targeting this VM " +
-            "via a deterministic network tag.",
-        ),
-
-      preemptible: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Use preemptible VM. Forces automaticRestart=false, onHostMaintenance=TERMINATE.",
-        ),
-
-      automaticRestart: z
-        .boolean()
-        .default(true)
-        .describe("Auto-restart on host failure. Forced false when preemptible=true."),
-
-      onHostMaintenance: z
-        .enum(["MIGRATE", "TERMINATE"])
-        .default("MIGRATE")
-        .describe("Host maintenance behaviour. Forced TERMINATE when preemptible=true."),
-
-      enableSecureBoot: z
-        .boolean()
-        .default(false)
-        .describe("Enable Secure Boot (Shielded VM)."),
-
-      enableVtpm: z
-        .boolean()
-        .default(false)
-        .describe("Enable vTPM (Shielded VM)."),
-
-      enableIntegrityMonitoring: z
-        .boolean()
-        .default(false)
-        .describe("Enable integrity monitoring (Shielded VM)."),
-
-      metadata: z
-        .record(z.string(), z.string())
-        .default({})
-        .describe(
-          "Additional GCE instance metadata. Reserved keys (ssh-keys, user-data, startup-script) rejected.",
-        ),
-
-      allowStoppingForUpdate: z
-        .boolean()
-        .default(true)
-        .describe("Allow stopping VM for in-place updates (e.g. machineType resize)."),
-
-      desiredStatus: z
-        .enum(["RUNNING", "TERMINATED"])
-        .default("RUNNING")
-        .describe("Desired VM status. TERMINATED stops without destroying."),
-    }).optional(),
-
-    // ---- AWS-Specific Sub-Object ----
-
-    aws: z.object({
-      amiFilter: z
-        .string()
-        .default(DEFAULT_AMI_FILTER)
-        .describe(
-          "AMI name filter for automatic resolution. Only used when common image field is empty.",
-        ),
-
-      amiOwner: z
-        .string()
-        .default(DEFAULT_AMI_OWNER)
-        .describe("AWS account ID that owns the AMI. Only used when image is empty."),
-
-      rootVolumeSizeGb: z
-        .number()
-        .min(8)
-        .max(16384)
-        .default(20)
-        .describe("Root EBS volume size in GB."),
-
-      rootVolumeType: z
-        .enum(["gp3", "gp2", "io1", "io2"])
-        .default("gp3")
-        .describe("Root EBS volume type."),
-
-      rootVolumeEncrypted: z
-        .boolean()
-        .default(true)
-        .describe("Encrypt root EBS volume. WARNING: changing DESTROYS AND RECREATES."),
-
-      keyPairName: z
-        .string()
-        .default("")
-        .describe("Name of an existing EC2 Key Pair. Does NOT create a key pair."),
-
-      subnetId: z
-        .string()
-        .default("")
-        .describe("EC2 subnet ID. Empty = default subnet."),
-
-      vpcId: z
-        .string()
-        .default("")
-        .describe("VPC ID for Security Group. Empty = default VPC."),
-
-      firewallRules: z
-        .array(AwsIngressRuleSchema)
-        .default([])
-        .describe("Ingress firewall rules for Security Group. Empty = deny all inbound."),
-
-      egressRules: z
-        .array(AwsEgressRuleSchema)
-        .default([])
-        .describe("Egress firewall rules. Empty = allow ALL outbound."),
-
-      requireImdsv2: z
-        .boolean()
-        .default(true)
-        .describe("Enforce IMDSv2 (HttpTokens='required'). Security best practice."),
-
-      instanceProfileArn: z
-        .string()
-        .default("")
-        .describe(
-          "ARN of existing IAM instance profile. When set, component creates NO IAM resources.",
-        ),
-
-      enableSsmAccess: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Attach SSM managed policy to component-created IAM role. Only when instanceProfileArn is empty.",
-        ),
-
-      allowStoppingForUpdate: z
-        .boolean()
-        .default(true)
-        .describe("Allow Pulumi to stop instance for in-place updates."),
-    }).optional(),
+    backups: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Enable automatic backups. " +
+          "Hetzner only. GCloud/AWS: not applicable.",
+      ),
   }),
   appComponentTypes: defaultAppComponentType(z.object({})),
   outputSchema: z.object({
@@ -647,15 +685,14 @@ component.implement(CloudProvider.hetzner, {
     // Empty SSH keys array: Hetzner handles SSH via hcloud.SshKey resources, not cloud-init.
     const effectiveUserData = buildUserData([], userData, startupScript);
 
-    // Hetzner-specific fields (from sub-object with defaults)
-    const h = inputs.hetzner as any ?? {};
-    const ipv4Enabled = h.ipv4Enabled ?? (inputs.assignPublicIp as boolean);
-    const ipv6Enabled = h.ipv6Enabled ?? true;
-    const firewallRules = (h.firewallRules ?? []) as any[];
-    const backups = h.backups ?? false;
-    const rebuildProtection = h.rebuildProtection ?? false;
-    const keepDisk = h.keepDisk ?? false;
-    const shutdownBeforeDeletion = h.shutdownBeforeDeletion ?? true;
+    // Hetzner-applicable fields (flat schema, read directly)
+    const ipv4Enabled = inputs.ipv4Enabled as boolean;
+    const ipv6Enabled = inputs.ipv6Enabled as boolean;
+    const firewallRules = (inputs.firewallRules ?? []) as any[];
+    const backups = inputs.backups as boolean;
+    const rebuildProtection = inputs.rebuildProtection as boolean;
+    const keepDisk = inputs.keepDisk as boolean;
+    const shutdownBeforeDeletion = inputs.shutdownBeforeDeletion as boolean;
 
     const providerOpts: pulumi.CustomResourceOptions = { provider };
 
@@ -709,8 +746,8 @@ component.implement(CloudProvider.hetzner, {
           direction: rule.direction,
           protocol: rule.protocol,
           port: rule.port,
-          sourceIps: rule.sourceIps,
-          destinationIps: rule.destinationIps,
+          sourceIps: rule.sourceRanges,
+          destinationIps: rule.destinationRanges,
           description: rule.description,
         })),
       }, providerOpts);
@@ -802,7 +839,7 @@ component.implement(CloudProvider.hetzner, {
         if (!ip) {
           throw new Error(
             "vm (hetzner): no public IPv4 address available. " +
-              "Ensure assignPublicIp is true or hetzner.ipv4Enabled is true in the component config.",
+              "Ensure assignPublicIp is true or ipv4Enabled is true in the component config.",
           );
         }
         return {
@@ -838,28 +875,27 @@ component.implement(CloudProvider.gcloud, {
     const labels = inputs.labels as Record<string, string>;
     const deletionProtection = inputs.deletionProtection;
 
-    // GCloud-specific fields (from sub-object)
-    const g = inputs.gcloud as any ?? {};
-    const imageFamily = g.imageFamily ?? "ubuntu-2404-lts-amd64";
-    const imageProject = g.imageProject ?? "ubuntu-os-cloud";
-    const bootDiskSizeGb = g.bootDiskSizeGb;
-    const bootDiskType = g.bootDiskType ?? "pd-balanced";
-    const sshUser = g.sshUser ?? "sdlc";
-    const networkId = g.networkId;
-    const subnetId = g.subnetId;
-    const networkTags = (g.networkTags ?? []) as string[];
-    const canIpForward = g.canIpForward ?? false;
-    const networkTier = g.networkTier ?? "PREMIUM";
-    const firewallRules = (g.firewallRules ?? []) as any[];
-    const preemptible = g.preemptible ?? false;
-    const automaticRestart = g.automaticRestart ?? true;
-    const onHostMaintenance = g.onHostMaintenance ?? "MIGRATE";
-    const enableSecureBoot = g.enableSecureBoot ?? false;
-    const enableVtpm = g.enableVtpm ?? false;
-    const enableIntegrityMonitoring = g.enableIntegrityMonitoring ?? false;
-    const userMetadata = (g.metadata ?? {}) as Record<string, string>;
-    const allowStoppingForUpdate = g.allowStoppingForUpdate ?? true;
-    const desiredStatus = g.desiredStatus ?? "RUNNING";
+    // GCloud-applicable fields (flat schema, read directly with concept-level names)
+    const imageFamily = inputs.imageFamily as string;
+    const imageProject = inputs.imageProject as string;
+    const bootDiskSizeGb = inputs.bootDiskSizeGb;
+    const bootDiskType = inputs.bootDiskType as string;
+    const sshUser = inputs.sshUser as string;
+    const networkId = inputs.networkId;
+    const subnetId = inputs.subnetId;
+    const networkTags = (inputs.networkTags ?? []) as string[];
+    const canIpForward = inputs.canIpForward as boolean;
+    const networkTier = inputs.networkTier as string;
+    const firewallRules = (inputs.firewallRules ?? []) as any[];
+    const preemptible = inputs.preemptible as boolean;
+    const automaticRestart = inputs.automaticRestart as boolean;
+    const onHostMaintenance = inputs.onHostMaintenance as string;
+    const secureBoot = inputs.secureBoot as boolean;
+    const virtualTpm = inputs.virtualTpm as boolean;
+    const integrityMonitoring = inputs.integrityMonitoring as boolean;
+    const userMetadata = (inputs.instanceMetadata ?? {}) as Record<string, string>;
+    const allowStoppingForUpdate = inputs.allowStoppingForUpdate as boolean;
+    const desiredStatus = inputs.desiredStatus as string;
 
     const gcpOpts: pulumi.CustomResourceOptions = { provider };
 
@@ -870,7 +906,7 @@ component.implement(CloudProvider.gcloud, {
         throw new Error(
           `vm (gcloud): metadata key "${key}" is reserved. ` +
             `Use the dedicated config field instead ` +
-            `(sshPublicKeys/gcloud.sshUser for "ssh-keys", userData for "user-data", ` +
+            `(sshPublicKeys/sshUser for "ssh-keys", userData for "user-data", ` +
             `startupScript for "startup-script").`,
         );
       }
@@ -902,14 +938,16 @@ component.implement(CloudProvider.gcloud, {
         network: firewallNetwork,
         direction: "INGRESS",
         targetTags: [fwTargetTag],
-        allows: firewallRules.map((rule: any) => ({
-          protocol: rule.protocol,
-          ports: rule.ports,
-        })),
+        allows: firewallRules
+          .filter((rule: any) => rule.direction === "in")
+          .map((rule: any) => ({
+            protocol: rule.protocol,
+            ports: rule.port ? [rule.port] : undefined,
+          })),
         sourceRanges: (() => {
           const ranges = new Set<string>();
           for (const rule of firewallRules) {
-            if (rule.sourceRanges) {
+            if (rule.direction === "in" && rule.sourceRanges) {
               for (const r of rule.sourceRanges) {
                 ranges.add(r);
               }
@@ -1008,9 +1046,9 @@ component.implement(CloudProvider.gcloud, {
       },
 
       shieldedInstanceConfig: {
-        enableSecureBoot: enableSecureBoot as boolean,
-        enableVtpm: enableVtpm as boolean,
-        enableIntegrityMonitoring: enableIntegrityMonitoring as boolean,
+        enableSecureBoot: secureBoot as boolean,
+        enableVtpm: virtualTpm as boolean,
+        enableIntegrityMonitoring: integrityMonitoring as boolean,
       },
 
       metadata: instanceMetadata,
@@ -1092,22 +1130,22 @@ component.implement(CloudProvider.aws, {
     const tags = inputs.labels as Record<string, string>;
     const deletionProtection = inputs.deletionProtection;
 
-    // AWS-specific fields (from sub-object)
-    const a = inputs.aws as any ?? {};
-    const amiFilter = a.amiFilter ?? DEFAULT_AMI_FILTER;
-    const amiOwner = a.amiOwner ?? DEFAULT_AMI_OWNER;
-    const rootVolumeSizeGb = a.rootVolumeSizeGb ?? 20;
-    const rootVolumeType = a.rootVolumeType ?? "gp3";
-    const rootVolumeEncrypted = a.rootVolumeEncrypted ?? true;
-    const keyPairName = a.keyPairName ?? "";
-    const subnetId = a.subnetId ?? "";
-    const vpcId = a.vpcId ?? "";
-    const firewallRules = (a.firewallRules ?? []) as any[];
-    const egressRules = (a.egressRules ?? []) as any[];
-    const requireImdsv2 = a.requireImdsv2 ?? true;
-    const instanceProfileArn = a.instanceProfileArn ?? "";
-    const enableSsmAccess = a.enableSsmAccess ?? false;
-    const allowStoppingForUpdate = a.allowStoppingForUpdate ?? true;
+    // AWS-applicable fields (flat schema, read directly with concept-level names)
+    const imageFilter = inputs.imageFilter as string;
+    const imageFilterOwner = inputs.imageFilterOwner as string;
+    const bootDiskSizeGb = (inputs.bootDiskSizeGb as number | undefined) ?? 20;
+    const bootDiskType = inputs.bootDiskType as string;
+    const bootDiskEncrypted = inputs.bootDiskEncrypted as boolean;
+    const keyPairName = inputs.keyPairName as string;
+    const subnetId = (inputs.subnetId as string) ?? "";
+    const vpcId = (inputs.networkId as string) ?? "";
+    const allFirewallRules = (inputs.firewallRules ?? []) as any[];
+    const ingressRules = allFirewallRules.filter((r: any) => r.direction === "in");
+    const egressRules = allFirewallRules.filter((r: any) => r.direction === "out");
+    const requireImdsv2 = inputs.requireImdsv2 as boolean;
+    const instanceProfileArn = inputs.instanceProfileArn as string;
+    const enableSsmAccess = inputs.enableSsmAccess as boolean;
+    const allowStoppingForUpdate = inputs.allowStoppingForUpdate as boolean;
 
     const awsOpts: pulumi.CustomResourceOptions = { provider };
 
@@ -1145,11 +1183,11 @@ component.implement(CloudProvider.aws, {
       const amiLookup = aws.ec2.getAmiOutput(
         {
           mostRecent: true,
-          owners: [amiOwner as string],
+          owners: [imageFilterOwner as string],
           filters: [
             {
               name: "name",
-              values: [amiFilter as string],
+              values: [imageFilter as string],
             },
           ],
         },
@@ -1177,22 +1215,28 @@ component.implement(CloudProvider.aws, {
       name: $`sg`,
       description: "Managed by sdlc.works vm component",
       ...(vpcId ? { vpcId: vpcId as string } : {}),
-      ingress: firewallRules.map((rule: any) => ({
-        protocol: rule.protocol,
-        fromPort: rule.fromPort,
-        toPort: rule.toPort,
-        cidrBlocks: rule.sourceRanges,
-        description: rule.description,
-      })),
+      ingress: ingressRules.map((rule: any) => {
+        const { fromPort, toPort } = parsePortRange(rule.port);
+        return {
+          protocol: rule.protocol,
+          fromPort,
+          toPort,
+          cidrBlocks: rule.sourceRanges,
+          description: rule.description,
+        };
+      }),
       egress:
         egressRules.length > 0
-          ? egressRules.map((rule: any) => ({
-              protocol: rule.protocol,
-              fromPort: rule.fromPort,
-              toPort: rule.toPort,
-              cidrBlocks: rule.destinationRanges,
-              description: rule.description,
-            }))
+          ? egressRules.map((rule: any) => {
+              const { fromPort, toPort } = parsePortRange(rule.port);
+              return {
+                protocol: rule.protocol,
+                fromPort,
+                toPort,
+                cidrBlocks: rule.destinationRanges,
+                description: rule.description,
+              };
+            })
           : [
               {
                 protocol: "-1",
@@ -1266,9 +1310,9 @@ component.implement(CloudProvider.aws, {
       userData: effectiveUserData || undefined,
 
       rootBlockDevice: {
-        volumeSize: rootVolumeSizeGb as number,
-        volumeType: rootVolumeType as string,
-        encrypted: rootVolumeEncrypted as boolean,
+        volumeSize: bootDiskSizeGb as number,
+        volumeType: bootDiskType as string,
+        encrypted: bootDiskEncrypted as boolean,
         tags: {
           ...baseTags,
           Name: $`root-volume`,

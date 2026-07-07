@@ -185,6 +185,23 @@ export const D1DatabaseCI = defineConnectionInterface(
   }),
 );
 
+// ---- DynamoDB Table (AWS) ----
+
+/**
+ * AWS DynamoDB table identity. Consumers authenticate with their own AWS
+ * identity; this producer supplies where and what the table is, not a secret.
+ */
+export const DynamoTableCI = defineConnectionInterface(
+  "dynamo-table",
+  z.object({}),
+  z.object({
+    tableName: z.string(),
+    tableArn: z.string(),
+    region: z.string(),
+    streamArn: z.string().optional(),
+  }),
+);
+
 // ---- Cloud Run Job (HTTP-triggerable) ----
 
 /**
