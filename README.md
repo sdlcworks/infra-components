@@ -10,6 +10,13 @@ Users reference this repo as an infra source in their SDLC project configuration
 
 | Directory | Description |
 |---|---|
+| `aws-cloudfront/` | AWS CloudFront distribution with S3 OAC and custom-origin support |
+| `aws-dynamodb/` | AWS DynamoDB table store with reviewed key schema and app-selected table access |
+| `aws-gwlb/` | AWS Gateway Load Balancer with endpoint-service and route-edit management |
+| `aws-lb/` | AWS Application / Network Load Balancer with listeners, target groups, and explicit ingress |
+| `aws-s3/` | AWS S3 bucket with permanent non-public posture and infra-addressable identity |
+| `aws-tgw/` | AWS Transit Gateway hub with attachments, route tables, propagation, and return routes |
+| `aws-vpc/` | AWS VPC fabric with subnet tiers, route tables, NAT, and endpoints |
 | `aws-vm/` | Standalone AWS EC2 VM (Elastic IP, Security Group, IAM instance profile, cloud-init) |
 | `gcloud-vm/` | Standalone Google Compute Engine VM (static IP, firewall, Shielded VM, cloud-init) |
 | `hetzner-vm/` | Standalone Hetzner Cloud VM (PrimaryIP, firewall, cloud-init) |
@@ -63,7 +70,7 @@ Build output lands at `.js/infra-bundle.tar.gz`.
 ### Dependencies
 
 Runtime dependencies are declared in `.js/package.json`:
-- `@sdlcworks/components` (0.0.63) -- the SDLC component authoring SDK (public npm)
+- `@sdlcworks/components` (0.0.64) -- the SDLC component authoring SDK (public npm)
 - `@pulumi/*` -- Pulumi providers (GCP, AWS, Cloudflare, Kubernetes, TLS, Command)
 - `zod`, `js-yaml`
 

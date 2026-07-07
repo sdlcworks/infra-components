@@ -22,6 +22,17 @@ export const PostgresCI = defineConnectionInterface(
   }),
 );
 
+// ---- MongoDB ----
+
+export const MongoCI = defineConnectionInterface(
+  "mongodb",
+  z.object({}),
+  z.object({
+    uri: z.string(),
+    dbName: z.string().optional(),
+  }),
+);
+
 // ---- Service Account ----
 
 /**
@@ -125,6 +136,23 @@ export const S3BucketCI = defineConnectionInterface(
     publicUrl: z.string().optional(),
     accessKeyId: z.string().optional(),
     secretAccessKey: z.string().optional(),
+  }),
+);
+
+// ---- DynamoDB Table ----
+
+export const DynamoTableCI = defineConnectionInterface(
+  "dynamo-table",
+  z.object({}),
+  z.object({
+    region: z.string(),
+    tables: z.array(z.object({
+      logicalName: z.string(),
+      tableName: z.string(),
+      arn: z.string(),
+      streamArn: z.string().optional(),
+      access: z.enum(["read", "write"]),
+    })),
   }),
 );
 

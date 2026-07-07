@@ -1,0 +1,21 @@
+name: aws-lb
+
+definition: Provides a stable L7 or L4 traffic distribution point for declared targets inside a network. It exists to make exposure scope, admission, listener behaviour, and target distribution explicit; without it, app traffic would have no reviewed ingress boundary.
+
+inputs:
+  - name: traffic-distribution-intent
+    description: Environment-declared listener, admission, protocol, and target distribution policy.
+  - name: aws-control-authority
+    description: Environment-provided authority to create and govern AWS infrastructure in the selected account and region.
+  - name: placement-context
+    description: Network placement meaning provided by a network fabric for locating the distributor.
+  - name: workload-target-identity
+    description: Target identity supplied by the workload boundary when non-serverless targets are declared.
+  - name: target-identity
+    description: Serverless target identity supplied by a function fleet when functions are declared as traffic targets.
+
+outputs:
+  - name: origin-address
+    description: Stable address meaning that an edge delivery subsystem can use as a dynamic origin.
+  - name: traffic-distributor-identity
+    description: Environment-visible identity and endpoint meaning of the traffic distributor.
