@@ -470,6 +470,8 @@ const AWS_S3_KMS_SSE_ALGORITHM = "aws:kms";
 const AWS_S3_OBJECT_OWNERSHIP = "BucketOwnerEnforced";
 const AWS_S3_LIFECYCLE_STATUS_ENABLED = "Enabled";
 const AWS_S3_VERSIONING_STATUS_ENABLED = "Enabled";
+const AWS_S3_LIFECYCLE_VERSIONING_DEPENDENCY_MISSING_ERROR =
+  "bucket(aws): lifecycle rules require versioning but BucketVersioning was not created";
 const AWS_POLICY_VERSION = "2012-10-17";
 const AWS_S3_PUBLIC_READ_ACTION = "s3:GetObject";
 const AWS_S3_PUBLIC_PRINCIPAL = "*";
@@ -486,7 +488,7 @@ function hasUnsupportedAwsLifecycleCondition(rule: BucketLifecycleRule): boolean
   return Boolean(
     condition.createdBefore ||
       (condition.matchesSuffix && condition.matchesSuffix.length > 0) ||
-      condition.daysSinceCustomTime,
+      condition.daysSinceCustomTime !== undefined,
   );
 }
 
@@ -578,6 +580,14 @@ function translateAwsLifecycleRules(
   }
 
   return translated;
+}
+
+function awsLifecycleRulesRequireVersioningCapability(
+  lifecycleRules: AwsLifecycleRule[],
+): boolean {
+  return lifecycleRules.some(
+    (rule) => rule.noncurrentVersionExpiration !== undefined,
+  );
 }
 
 component.implement(CloudProvider.aws, {
@@ -709,8 +719,9 @@ component.implement(CloudProvider.aws, {
       { ...awsOpts, dependsOn: [bucket] },
     );
 
+    let bucketVersioning: aws.s3.BucketVersioning | undefined;
     if (config.versioning) {
-      new aws.s3.BucketVersioning(
+      bucketVersioning = new aws.s3.BucketVersioning(
         $`s3-versioning-${name}`,
         {
           bucket: bucket.bucket,
@@ -744,13 +755,23 @@ component.implement(CloudProvider.aws, {
       config.versioning,
     );
     if (lifecycleRules.length > 0) {
+      const lifecycleDependsOn: pulumi.Resource[] = [bucket];
+      if (awsLifecycleRulesRequireVersioningCapability(
+        lifecycleRules,
+      )) {
+        if (!bucketVersioning) {
+          throw new Error(AWS_S3_LIFECYCLE_VERSIONING_DEPENDENCY_MISSING_ERROR);
+        }
+        lifecycleDependsOn.push(bucketVersioning);
+      }
+
       new aws.s3.BucketLifecycleConfiguration(
         $`s3-lifecycle-${name}`,
         {
           bucket: bucket.bucket,
           rules: lifecycleRules,
         },
-        { ...awsOpts, dependsOn: [bucket] },
+        { ...awsOpts, dependsOn: lifecycleDependsOn },
       );
     }
 
