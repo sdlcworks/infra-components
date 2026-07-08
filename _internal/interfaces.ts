@@ -244,6 +244,14 @@ export const PublicCI = defineConnectionInterface(
   z.object({
     appComponentType: z.string(),
     host: z.string(),
+    /**
+     * Origin-addressed (host-locked) endpoint: the origin serves only
+     * requests whose Host equals this endpoint's own provider-assigned
+     * host. Absent ⇒ unconstrained. Downstream publishers that alias
+     * this endpoint under another name must provision a re-addressing
+     * hop rather than pure name aliasing.
+     */
+    originAddressed: z.boolean().optional(),
     port: z.number().optional(),
     // tcp-service
     mode: z.enum(["plain", "tls", "mtls"]).optional(),

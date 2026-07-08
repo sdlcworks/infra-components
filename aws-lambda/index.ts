@@ -832,6 +832,9 @@ component.implement(CloudProvider.aws, {
             host,
             protocol: "https" as const,
             port: 443,
+            // AWS function URLs are host-routed: they serve only requests
+            // addressed by their own *.lambda-url.* name.
+            originAddressed: true,
           },
         };
       },

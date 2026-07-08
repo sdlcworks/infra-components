@@ -3,6 +3,8 @@ import * as cloudflare from "@pulumi/cloudflare";
 import {
   APEX_NAME,
   CF_TTL_AUTO,
+  HOST_REWRITE_BODY_PART,
+  HOST_REWRITE_SCRIPT_NAME_PREFIX,
   LOG_PREFIX,
   RESOURCE_NAMES,
   WILDCARD_NAME,
@@ -22,6 +24,7 @@ export type RawMetadata = {
   port?: pulumi.Input<number | undefined>;
   protocol?: pulumi.Input<PublicMetadata["protocol"] | undefined>;
   mode?: pulumi.Input<PublicMetadata["mode"] | undefined>;
+  originAddressed?: pulumi.Input<boolean | undefined>;
   [k: string]: unknown;
 };
 
@@ -175,4 +178,79 @@ export function createWorkerCustomDomain({
 
 export function buildWorkerResultUri(fqdn: string): pulumi.Output<string> {
   return pulumi.output(`${PROTOCOL.HTTPS}://${fqdn}`);
+}
+
+export type HostRewriteRoute = {
+  appName: string;
+  fqdn: string;
+  originHost: pulumi.Output<string>;
+};
+
+export type CreateHostRewriteArgs = {
+  $: NamingFn;
+  opts: { provider: cloudflare.Provider };
+  accountId: string;
+  zoneId: pulumi.Input<string>;
+  routes: HostRewriteRoute[];
+};
+
+/**
+ * Managed re-addressing hop for origin-addressed (host-locked) origins.
+ * A single service-worker script re-issues each incoming request against
+ * https://<origin host> — preserving path, query, method, headers, and
+ * body via the Request copy — so the upstream fetch carries the origin's
+ * own Host. One WorkersRoute (`<fqdn>/*`) binds each published name to
+ * the script. Origin hosts may be pulumi Outputs, so the script content
+ * is assembled inside apply(), never at plan time.
+ */
+export function createHostRewriteWorker({
+  $,
+  opts,
+  accountId,
+  zoneId,
+  routes,
+}: CreateHostRewriteArgs): void {
+  const allHosts = pulumi.all(routes.map((r) => r.originHost));
+  const scriptContent = allHosts.apply((hosts) => {
+    const routeMap: Record<string, string> = {};
+    routes.forEach((r, i) => {
+      routeMap[r.fqdn] = hosts[i]!;
+    });
+    return [
+      'addEventListener("fetch", (event) => { event.respondWith(handle(event.request)); });',
+      `const ROUTES = ${JSON.stringify(routeMap)};`,
+      "async function handle(request) {",
+      "  const url = new URL(request.url);",
+      "  const target = ROUTES[url.hostname];",
+      '  if (!target) return new Response("unknown host: " + url.hostname, { status: 404 });',
+      '  url.protocol = "https:";',
+      "  url.hostname = target;",
+      '  url.port = "";',
+      "  return fetch(new Request(url.toString(), request));",
+      "}",
+    ].join("\n");
+  });
+
+  const worker = new cloudflare.WorkersScript(
+    $`${RESOURCE_NAMES.HOST_REWRITE_SCRIPT}`,
+    {
+      accountId,
+      scriptName: pulumi.interpolate`${HOST_REWRITE_SCRIPT_NAME_PREFIX}-${zoneId}`,
+      content: scriptContent,
+      bodyPart: HOST_REWRITE_BODY_PART,
+    },
+    opts,
+  );
+
+  for (const r of routes) {
+    new cloudflare.WorkersRoute(
+      $`${RESOURCE_NAMES.HOST_REWRITE_ROUTE}-${r.appName}`,
+      {
+        zoneId,
+        pattern: `${r.fqdn}/*`,
+        script: worker.scriptName,
+      },
+      opts,
+    );
+  }
 }

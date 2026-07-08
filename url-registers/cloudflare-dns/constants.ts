@@ -45,4 +45,13 @@ export const RESOURCE_NAMES = {
   APEX_SUFFIX: "apex",
   WILDCARD_SUFFIX: "wildcard",
   WORKER_DOMAIN: "worker-domain",
+  HOST_REWRITE_SCRIPT: "host-rewrite-script",
+  HOST_REWRITE_ROUTE: "host-rewrite-route",
 } as const;
+
+// Cloudflare-side (dashboard-visible) name of the managed host-rewrite
+// Worker script; suffixed with the zone id for per-zone uniqueness.
+export const HOST_REWRITE_SCRIPT_NAME_PREFIX = "cf-dns-host-rewrite";
+
+// Uploaded body-part filename for the service-worker script content.
+export const HOST_REWRITE_BODY_PART = "worker.js";

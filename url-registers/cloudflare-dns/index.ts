@@ -9,11 +9,13 @@ import {
   buildComponentResultUri,
   buildWorkerResultUri,
   createDnsRecord,
+  createHostRewriteWorker,
   createWorkerCustomDomain,
   resolveFqdn,
   resolveTtl,
   warnMissingComponents,
   type ComponentEntry,
+  type HostRewriteRoute,
 } from "./provision";
 
 const register = new URLRegister({
@@ -62,6 +64,8 @@ const register = new URLRegister({
       presentAppNames,
     );
 
+    const hostRewriteRoutes: HostRewriteRoute[] = [];
+
     for (const [appName, { metadata }] of Object.entries(
       components as Record<string, ComponentEntry>,
     )) {
@@ -93,6 +97,23 @@ const register = new URLRegister({
       const ttl = resolveTtl(rcfg, config.defaults, proxied);
       const host = pulumi.output(metadata.host) as pulumi.Output<string>;
 
+      if (pulumi.Output.isInstance(metadata.originAddressed)) {
+        throw new Error(
+          `${LOG_PREFIX} component '${appName}' returned metadata.originAddressed as a pulumi Output; the addressing constraint must be a plan-time boolean`,
+        );
+      }
+      const originAddressed = metadata.originAddressed === true;
+
+      if (originAddressed && !proxied) {
+        throw new Error(
+          `${LOG_PREFIX} component '${appName}' (${fqdn}) is origin-addressed: it serves only requests addressed by its own origin host, so the record must be proxied with a managed host-rewrite hop. The record resolves to proxied=false (records.${appName}.proxied ?? defaults.proxied); refusing rather than silently coercing. Set proxied=true (or remove the override) for this record.`,
+        );
+      }
+
+      if (originAddressed) {
+        hostRewriteRoutes.push({ appName, fqdn, originHost: host });
+      }
+
       createDnsRecord({
         $,
         opts,
@@ -109,6 +130,24 @@ const register = new URLRegister({
         fqdn,
         proxied,
         metadata,
+      });
+    }
+
+    // --- Managed host-rewrite hop for origin-addressed components ---
+    if (hostRewriteRoutes.length > 0) {
+      const accountId = creds.CLOUDFLARE_ACCOUNT_ID;
+      if (!accountId) {
+        throw new Error(
+          `${LOG_PREFIX} CLOUDFLARE_ACCOUNT_ID is required in credentials when origin-addressed components are present (found ${hostRewriteRoutes.length}: ${hostRewriteRoutes.map((r) => r.appName).join(", ")})`,
+        );
+      }
+
+      createHostRewriteWorker({
+        $,
+        opts,
+        accountId,
+        zoneId: zone.zoneId,
+        routes: hostRewriteRoutes,
       });
     }
 
