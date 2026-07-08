@@ -13,6 +13,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 | `aws-cloudfront/` | AWS CloudFront distribution with S3 OAC and custom-origin support |
 | `aws-dynamodb/` | AWS DynamoDB table store with reviewed key schema and app-selected table access |
 | `aws-gwlb/` | AWS Gateway Load Balancer with endpoint-service and route-edit management |
+| `aws-lambda/` | AWS Lambda function fleet with deploy-time code updates |
 | `aws-lb/` | AWS Application / Network Load Balancer with listeners, target groups, and explicit ingress |
 | `aws-s3/` | AWS S3 bucket with permanent non-public posture and infra-addressable identity |
 | `aws-tgw/` | AWS Transit Gateway hub with attachments, route tables, propagation, and return routes |
@@ -34,6 +35,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 
 | Directory | Description |
 |---|---|
+| `artifact-registries/aws-ecr/` | AWS ECR image registry for same-account AWS workloads |
 | `artifact-registries/gcp-artifact-registry/` | GCP Artifact Registry (Docker, npm) |
 | `artifact-registries/github-releases/` | GitHub Releases |
 | `artifact-registries/azure-devops-npm/` | Azure DevOps npm feed |
