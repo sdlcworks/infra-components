@@ -356,6 +356,45 @@ async function seedImageExists(
   }
 }
 
+async function uploadSeedBlob(
+  ecr: ECRClient,
+  repositoryName: string,
+  blob: Buffer,
+  digest: string,
+): Promise<void> {
+  try {
+    const upload = await ecr.send(
+      new InitiateLayerUploadCommand({ repositoryName }),
+    );
+    if (!upload.uploadId) {
+      throw new Error("aws-lambda: ECR did not return a layer upload ID.");
+    }
+    await ecr.send(
+      new UploadLayerPartCommand({
+        repositoryName,
+        uploadId: upload.uploadId,
+        partFirstByte: 0,
+        partLastByte: blob.length - 1,
+        layerPartBlob: blob,
+      }),
+    );
+    await ecr.send(
+      new CompleteLayerUploadCommand({
+        repositoryName,
+        uploadId: upload.uploadId,
+        layerDigests: [digest],
+      }),
+    );
+  } catch (error) {
+    // The blob is already present in the repository (e.g. a prior partial
+    // seed attempt); presence is exactly the postcondition we need.
+    if ((error as { name?: string }).name === "LayerAlreadyExistsException") {
+      return;
+    }
+    throw error;
+  }
+}
+
 async function ensureSeedImage(
   repositoryUrl: string,
   architecture: "x86_64" | "arm64",
@@ -390,56 +429,13 @@ async function ensureSeedImage(
   );
   const configDigest = sha256(config);
 
-  const upload = await ecr.send(
-    new InitiateLayerUploadCommand({ repositoryName }),
-  );
-  if (!upload.uploadId) {
-    throw new Error("aws-lambda: ECR did not return a layer upload ID.");
-  }
-
-  await ecr.send(
-    new UploadLayerPartCommand({
-      repositoryName,
-      uploadId: upload.uploadId,
-      partFirstByte: 0,
-      partLastByte: layer.length - 1,
-      layerPartBlob: layer,
-    }),
-  );
-  await ecr.send(
-    new CompleteLayerUploadCommand({
-      repositoryName,
-      uploadId: upload.uploadId,
-      layerDigests: [layerDigest],
-    }),
-  );
-
-  // The image config JSON is a registry blob too: ECR validates that every
-  // digest the manifest references (config AND layers) exists as an uploaded
-  // blob before accepting PutImage. Config blobs travel through the same
-  // layer-upload API.
-  const configUpload = await ecr.send(
-    new InitiateLayerUploadCommand({ repositoryName }),
-  );
-  if (!configUpload.uploadId) {
-    throw new Error("aws-lambda: ECR did not return a config upload ID.");
-  }
-  await ecr.send(
-    new UploadLayerPartCommand({
-      repositoryName,
-      uploadId: configUpload.uploadId,
-      partFirstByte: 0,
-      partLastByte: config.length - 1,
-      layerPartBlob: config,
-    }),
-  );
-  await ecr.send(
-    new CompleteLayerUploadCommand({
-      repositoryName,
-      uploadId: configUpload.uploadId,
-      layerDigests: [configDigest],
-    }),
-  );
+  // The image config JSON is a registry blob just like the layers: ECR
+  // validates every digest the manifest references against uploaded blobs
+  // before accepting PutImage, and config blobs travel through the same
+  // layer-upload API. Each upload tolerates LayerAlreadyExistsException so a
+  // rerun after a partial prior attempt converges instead of failing.
+  await uploadSeedBlob(ecr, repositoryName, layer, layerDigest);
+  await uploadSeedBlob(ecr, repositoryName, config, configDigest);
 
   const manifest = {
     schemaVersion: 2,
