@@ -414,6 +414,33 @@ async function ensureSeedImage(
     }),
   );
 
+  // The image config JSON is a registry blob too: ECR validates that every
+  // digest the manifest references (config AND layers) exists as an uploaded
+  // blob before accepting PutImage. Config blobs travel through the same
+  // layer-upload API.
+  const configUpload = await ecr.send(
+    new InitiateLayerUploadCommand({ repositoryName }),
+  );
+  if (!configUpload.uploadId) {
+    throw new Error("aws-lambda: ECR did not return a config upload ID.");
+  }
+  await ecr.send(
+    new UploadLayerPartCommand({
+      repositoryName,
+      uploadId: configUpload.uploadId,
+      partFirstByte: 0,
+      partLastByte: config.length - 1,
+      layerPartBlob: config,
+    }),
+  );
+  await ecr.send(
+    new CompleteLayerUploadCommand({
+      repositoryName,
+      uploadId: configUpload.uploadId,
+      layerDigests: [configDigest],
+    }),
+  );
+
   const manifest = {
     schemaVersion: 2,
     mediaType: DOCKER_MANIFEST_MEDIA_TYPE,
