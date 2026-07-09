@@ -30,12 +30,11 @@ const ROOT_PATH_PREFIX = "/";
 const TCP_PROTOCOL = "tcp";
 const BACKUP_ENABLED = "ENABLED";
 const BACKUP_DISABLED = "DISABLED";
-const POLICY_EFFECT_ALLOW = "Allow";
 const POLICY_EFFECT_DENY = "Deny";
 const PRINCIPAL_ALL = "*";
 const PRINCIPAL_AWS = "AWS";
 const BOOL_CONDITION = "Bool";
-const STRING_EQUALS_CONDITION = "StringEquals";
+const STRING_NOT_EQUALS_CONDITION = "StringNotEquals";
 const SECURE_TRANSPORT_CONDITION_KEY = "aws:SecureTransport";
 const ACCESS_POINT_ARN_CONDITION_KEY = "elasticfilesystem:AccessPointArn";
 const FALSE_CONDITION_VALUE = "false";
@@ -294,12 +293,12 @@ function buildFileSystemPolicy(
       Resource: fileSystemArn,
     },
     {
-      Effect: POLICY_EFFECT_ALLOW,
+      Effect: POLICY_EFFECT_DENY,
       Principal: { [PRINCIPAL_AWS]: PRINCIPAL_ALL },
       Action: CLIENT_MOUNT_ACTION,
       Resource: fileSystemArn,
       Condition: {
-        [STRING_EQUALS_CONDITION]: {
+        [STRING_NOT_EQUALS_CONDITION]: {
           [ACCESS_POINT_ARN_CONDITION_KEY]: Object.values(accessPointArns),
         },
       },
@@ -312,15 +311,22 @@ function buildFileSystemPolicy(
 
   if (writableAccessPointArns.length > 0) {
     statements.push({
-      Effect: POLICY_EFFECT_ALLOW,
+      Effect: POLICY_EFFECT_DENY,
       Principal: { [PRINCIPAL_AWS]: PRINCIPAL_ALL },
       Action: CLIENT_WRITE_ACTION,
       Resource: fileSystemArn,
       Condition: {
-        [STRING_EQUALS_CONDITION]: {
+        [STRING_NOT_EQUALS_CONDITION]: {
           [ACCESS_POINT_ARN_CONDITION_KEY]: writableAccessPointArns,
         },
       },
+    });
+  } else {
+    statements.push({
+      Effect: POLICY_EFFECT_DENY,
+      Principal: { [PRINCIPAL_AWS]: PRINCIPAL_ALL },
+      Action: CLIENT_WRITE_ACTION,
+      Resource: fileSystemArn,
     });
   }
 

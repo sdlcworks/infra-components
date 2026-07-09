@@ -5,6 +5,7 @@
       "name": "sdlc-components",
       "dependencies": {
         "@aws-sdk/client-ecr": "^3.978.0",
+        "@aws-sdk/client-ecs": "^3.978.0",
         "@aws-sdk/client-lambda": "^3.978.0",
         "@aws-sdk/client-sts": "^3.978.0",
         "@pulumi/aws": "^7.14.0",
