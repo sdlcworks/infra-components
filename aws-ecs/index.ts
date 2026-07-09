@@ -136,7 +136,7 @@ const ExposureSchema = z.discriminatedUnion("mode", [
     .object({
       mode: z.literal("owned-alb"),
       allowedIngressCidrs: z.array(z.string()).min(1),
-      publicNames: z.array(z.string()).default([]),
+      publicNames: z.array(z.string().min(1)).default([]),
       certificateArn: z.string().optional(),
       redirectHttpToHttps: z.boolean().optional(),
       testAccessCidrs: z.array(z.string()).optional(),
@@ -217,6 +217,7 @@ const ServiceConfigSchema = z
       .number()
       .int()
       .min(DEFAULT_EPHEMERAL_STORAGE_GB)
+      .max(200)
       .default(DEFAULT_EPHEMERAL_STORAGE_GB),
     enableExecuteCommand: z.boolean().default(false),
     command: z.array(z.string()).optional(),
@@ -240,12 +241,19 @@ const DefaultsSchema = z
   })
   .strict();
 
-const ConfigSchema = z
+const DiscoveryNamespaceSchema = z
+  .object({
+    name: z.string().min(1),
+    arn: z.string().min(1),
+  })
+  .strict();
+
+export const ConfigSchema = z
   .object({
     vpcId: z.string().min(1),
     privateSubnetIds: z.array(z.string().min(1)).min(1),
     publicSubnetIds: z.array(z.string().min(1)).optional(),
-    discoveryNamespace: z.string().min(1),
+    discoveryNamespace: DiscoveryNamespaceSchema,
     observability: z
       .object({
         containerInsights: z.enum(["disabled", "enabled", "enhanced"]),
@@ -270,6 +278,19 @@ const ConfigSchema = z
         message:
           "aws-ecs: publicSubnetIds must include at least two public subnets for owned-alb exposure.",
       });
+    }
+    for (const [serviceKey, service] of Object.entries(config.services)) {
+      if (
+        service.exposure.mode === "owned-alb" &&
+        service.exposure.certificateArn &&
+        service.exposure.publicNames.length === 0
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["services", serviceKey, "exposure", "publicNames"],
+          message: `aws-ecs: service "${serviceKey}" certificateArn requires at least one publicName.`,
+        });
+      }
     }
   });
 
@@ -315,6 +336,34 @@ type EcrImageReference = {
 };
 type TaskDefinitionTemplate = RegisterTaskDefinitionCommandInput;
 
+export type WorkloadTarget = {
+  targetType: "ip";
+  port: number;
+  protocol: "HTTP";
+  health: {
+    protocol: "HTTP";
+    path: string;
+    gracePeriodSeconds: number;
+  };
+  deregistrationDelaySeconds: number;
+};
+
+const WorkloadTargetSchema = z
+  .object({
+    targetType: z.literal("ip"),
+    port: z.number().int().min(1).max(65535),
+    protocol: z.literal("HTTP"),
+    health: z
+      .object({
+        protocol: z.literal("HTTP"),
+        path: z.string(),
+        gracePeriodSeconds: z.number().int().min(0),
+      })
+      .strict(),
+    deregistrationDelaySeconds: z.number().int().min(0).max(3600),
+  })
+  .strict();
+
 const component = new InfraComponent({
   metadata: {
     stateful: true,
@@ -346,6 +395,7 @@ const component = new InfraComponent({
     ownedAlbDnsNames: z.record(z.string(), z.string()),
     ownedAlbZoneIds: z.record(z.string(), z.string()),
     internalEndpoints: z.record(z.string(), z.string()),
+    workloadTargets: z.record(z.string(), WorkloadTargetSchema),
     namespaceArn: z.string(),
   }),
 });
@@ -650,6 +700,15 @@ function validateResolvedConfig(
       );
     }
     if (
+      service.exposure.mode === "owned-alb" &&
+      service.exposure.certificateArn &&
+      service.exposure.publicNames.length === 0
+    ) {
+      throw new Error(
+        `aws-ecs: service "${serviceKey}" certificateArn requires at least one publicName.`,
+      );
+    }
+    if (
       service.scaling.requestsPerTarget !== undefined &&
       service.exposure.mode !== "external-attachment"
     ) {
@@ -705,7 +764,11 @@ function validateResolvedConfig(
   }
 }
 
-function validateFargateSize(serviceKey: string, cpu: number, memoryMb: number): void {
+export function validateFargateSize(
+  serviceKey: string,
+  cpu: number,
+  memoryMb: number,
+): void {
   const matrix: Record<number, number[]> = {
     256: [512, 1024, 2048],
     512: [1024, 2048, 3072, 4096],
@@ -714,7 +777,7 @@ function validateFargateSize(serviceKey: string, cpu: number, memoryMb: number):
     4096: range(8192, 30720, 1024),
     8192: range(16384, 61440, 4096),
     16384: range(32768, 122880, 8192),
-    32768: range(61440, 249856, 8192),
+    32768: [61440, 122880, 249856],
   };
   if (!matrix[cpu]?.includes(memoryMb)) {
     throw new Error(
@@ -892,8 +955,9 @@ function containerDefinitions(
   ]);
 }
 
-function taskTemplate(
+export function taskTemplate(
   family: string,
+  serviceName: string,
   service: ResolvedServiceConfig,
   executionRoleArn: string,
   taskRoleArn: string,
@@ -909,7 +973,7 @@ function taskTemplate(
     executionRoleArn,
     taskRoleArn,
     containerDefinitions: JSON.parse(
-      containerDefinitions(service, family, region, image),
+      containerDefinitions(service, serviceName, region, image),
     ),
     runtimePlatform: {
       operatingSystemFamily: "LINUX",
@@ -930,6 +994,56 @@ function taskTemplate(
         },
       },
     })),
+  };
+}
+
+export function internalEndpoint(
+  serviceKey: string,
+  namespaceName: string,
+  port: number,
+): { dnsName: string; port: number; uri: string } {
+  const dnsName = `${serviceKey}.${namespaceName}`;
+  return { dnsName, port, uri: `${dnsName}:${port}` };
+}
+
+export function desiredCountIgnoreChanges(
+  activated: boolean,
+  scaling: { min: number; max: number },
+): string[] {
+  return !activated || scaling.max > scaling.min ? ["desiredCount"] : [];
+}
+
+export function publicEndpointHost(
+  publicNames: string[],
+  albDnsName: string,
+): string {
+  return publicNames[0] ?? albDnsName;
+}
+
+export function assertExternalTargetGroupTargetType(
+  serviceKey: string,
+  targetType: string,
+): void {
+  if (targetType !== "ip") {
+    throw new Error(
+      `aws-ecs: service "${serviceKey}" external-attachment target group must use targetType "ip" for Fargate awsvpc tasks.`,
+    );
+  }
+}
+
+export function workloadTarget(
+  service: Pick<ResolvedServiceConfig, "port" | "health">,
+): WorkloadTarget {
+  return {
+    targetType: "ip",
+    port: service.port!,
+    protocol: "HTTP",
+    health: {
+      protocol: "HTTP",
+      path: service.health.path,
+      gracePeriodSeconds: service.health.gracePeriodSeconds,
+    },
+    deregistrationDelaySeconds: DEFAULT_DEREGISTRATION_DELAY_SECONDS,
   };
 }
 
@@ -1072,7 +1186,7 @@ component.implement(CloudProvider.aws, {
   stateSchema: z.object({
     accountId: z.string().optional(),
     region: z.string().optional(),
-    discoveryNamespace: z.string().optional(),
+    discoveryNamespace: DiscoveryNamespaceSchema.optional(),
     clusterArn: z.string().optional(),
     fleetFingerprint: z.string().optional(),
     serviceFingerprints: z.record(z.string(), z.string()).default({}),
@@ -1088,6 +1202,7 @@ component.implement(CloudProvider.aws, {
     ownedAlbDnsNames: z.record(z.string(), z.string()).default({}),
     ownedAlbZoneIds: z.record(z.string(), z.string()).default({}),
     internalEndpoints: z.record(z.string(), z.string()).default({}),
+    workloadTargets: z.record(z.string(), WorkloadTargetSchema).default({}),
     imageRepositoryUrl: z.string().optional(),
     allocations: z.record(z.string(), AllocationSchema).default({}),
     activated: z.record(z.string(), z.boolean()).default({}),
@@ -1107,6 +1222,7 @@ component.implement(CloudProvider.aws, {
     ownedAlbDnsNames: {},
     ownedAlbZoneIds: {},
     internalEndpoints: {},
+    workloadTargets: {},
     allocations: {},
     activated: {},
     deployedArtifacts: {},
@@ -1126,14 +1242,6 @@ component.implement(CloudProvider.aws, {
 
     const caller = aws.getCallerIdentityOutput({}, awsOpts);
     const region = aws.getRegionOutput({}, awsOpts).name;
-    const namespace = new aws.servicediscovery.HttpNamespace(
-      $`namespace`,
-      {
-        name: config.discoveryNamespace,
-        tags: config.labels,
-      },
-      awsOpts,
-    );
     const cluster = new aws.ecs.Cluster(
       $`cluster`,
       {
@@ -1144,7 +1252,7 @@ component.implement(CloudProvider.aws, {
           },
         ],
         serviceConnectDefaults: {
-          namespace: namespace.arn,
+          namespace: config.discoveryNamespace.arn,
         },
         tags: config.labels,
       },
@@ -1213,6 +1321,7 @@ component.implement(CloudProvider.aws, {
     const ownedAlbDnsNames: Record<string, pulumi.Output<string>> = {};
     const ownedAlbZoneIds: Record<string, pulumi.Output<string>> = {};
     const internalEndpoints: Record<string, string> = {};
+    const workloadTargets: Record<string, WorkloadTarget> = {};
 
     for (const [serviceKey, service] of Object.entries(services)) {
       const serviceActivated = !!activated[serviceKey];
@@ -1331,22 +1440,34 @@ component.implement(CloudProvider.aws, {
           { arn: service.exposure.targetGroupArn },
           awsInvokeOpts,
         );
+        const validatedTargetGroupArn = pulumi
+          .all([externalTargetGroup.arn, externalTargetGroup.targetType])
+          .apply(([arn, targetType]) => {
+            assertExternalTargetGroupTargetType(serviceKey, targetType);
+            return arn;
+          });
         const externalLoadBalancer = aws.lb.getLoadBalancerOutput(
           {
             arn: externalLoadBalancerArn(serviceKey, externalTargetGroup),
           },
           awsInvokeOpts,
         );
+        const validatedLoadBalancerSecurityGroupId = pulumi
+          .all([
+            validatedTargetGroupArn,
+            externalLoadBalancerSecurityGroupId(
+              serviceKey,
+              externalLoadBalancer,
+            ),
+          ])
+          .apply(([, securityGroupId]) => securityGroupId);
         serviceDeps.push(
           new aws.ec2.SecurityGroupRule(
             $`sg-${serviceKey}-from-attachment`,
             {
               type: "ingress",
               securityGroupId: serviceSecurityGroup.id,
-              sourceSecurityGroupId: externalLoadBalancerSecurityGroupId(
-                serviceKey,
-                externalLoadBalancer,
-              ),
+              sourceSecurityGroupId: validatedLoadBalancerSecurityGroupId,
               protocol: "tcp",
               fromPort: service.port!,
               toPort: service.port!,
@@ -1357,11 +1478,12 @@ component.implement(CloudProvider.aws, {
         );
         loadBalancers = [
           {
-            targetGroupArn: service.exposure.targetGroupArn,
+            targetGroupArn: validatedTargetGroupArn,
             containerName: CONTAINER_NAME,
             containerPort: service.port!,
           },
         ];
+        workloadTargets[serviceKey] = workloadTarget(service);
         if (service.scaling.requestsPerTarget !== undefined) {
           requestMetricResourceLabel = externalRequestMetricResourceLabel(
             serviceKey,
@@ -1651,7 +1773,14 @@ component.implement(CloudProvider.aws, {
             },
           },
         ];
-        publicEndpoints[serviceKey] = pulumi.interpolate`${publicProtocol(service)}://${loadBalancer.dnsName}`;
+        const publicNames = service.exposure.publicNames;
+        publicEndpoints[serviceKey] = loadBalancer.dnsName.apply(
+          (dnsName) =>
+            `${publicProtocol(service)}://${publicEndpointHost(
+              publicNames,
+              dnsName,
+            )}`,
+        );
         ownedAlbDnsNames[serviceKey] = loadBalancer.dnsName;
         ownedAlbZoneIds[serviceKey] = loadBalancer.zoneId;
       }
@@ -1668,6 +1797,7 @@ component.implement(CloudProvider.aws, {
         .apply(([executionRoleArn, taskRoleArn, resolvedRegion, seedImage]) =>
           taskTemplate(
             family,
+            serviceName,
             service,
             executionRoleArn,
             taskRoleArn,
@@ -1722,27 +1852,35 @@ component.implement(CloudProvider.aws, {
         },
       );
 
+      const endpoint =
+        service.exposure.mode === "internal"
+          ? internalEndpoint(
+              serviceKey,
+              config.discoveryNamespace.name,
+              service.port!,
+            )
+          : undefined;
       const serviceConnectConfiguration = {
         enabled: true,
-        namespace: namespace.arn,
+        namespace: config.discoveryNamespace.arn,
         services:
-          service.exposure.mode === "internal"
+          endpoint
             ? [
                 {
                   portName: CONTAINER_NAME,
                   discoveryName: serviceKey,
                   clientAlias: [
                     {
-                      dnsName: serviceKey,
-                      port: service.port!,
+                      dnsName: endpoint.dnsName,
+                      port: endpoint.port,
                     },
                   ],
                 },
               ]
             : undefined,
       };
-      if (service.exposure.mode === "internal") {
-        internalEndpoints[serviceKey] = `${serviceKey}.${config.discoveryNamespace}:${service.port}`;
+      if (endpoint) {
+        internalEndpoints[serviceKey] = endpoint.uri;
       }
 
       const ecsService = new aws.ecs.Service(
@@ -1801,7 +1939,10 @@ component.implement(CloudProvider.aws, {
         {
           ...awsOpts,
           dependsOn: serviceDeps,
-          ignoreChanges: ["desiredCount"],
+          ignoreChanges: desiredCountIgnoreChanges(
+            serviceActivated,
+            service.scaling,
+          ),
         },
       );
 
@@ -1904,6 +2045,7 @@ component.implement(CloudProvider.aws, {
     (state as any).ownedAlbDnsNames = ownedAlbDnsNames;
     (state as any).ownedAlbZoneIds = ownedAlbZoneIds;
     state.internalEndpoints = internalEndpoints;
+    state.workloadTargets = workloadTargets;
     (state as any).imageRepositoryUrl = seedRepository.repositoryUrl;
 
     return {
@@ -1916,7 +2058,8 @@ component.implement(CloudProvider.aws, {
       ownedAlbDnsNames: pulumi.output(ownedAlbDnsNames),
       ownedAlbZoneIds: pulumi.output(ownedAlbZoneIds),
       internalEndpoints: pulumi.output(internalEndpoints),
-      namespaceArn: namespace.arn,
+      workloadTargets: pulumi.output(workloadTargets),
+      namespaceArn: pulumi.output(config.discoveryNamespace.arn),
     };
   },
 

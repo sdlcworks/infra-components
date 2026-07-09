@@ -12,6 +12,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 |---|---|
 | `aws-cloudfront/` | AWS CloudFront distribution with S3 OAC and custom-origin support |
 | `aws-dynamodb/` | AWS DynamoDB table store with reviewed key schema and app-selected table access |
+| `aws-ecs/` | AWS ECS Fargate service fleet with reviewed scaling, discovery, exposure, and deployment posture |
 | `aws-gwlb/` | AWS Gateway Load Balancer with endpoint-service and route-edit management |
 | `aws-lambda/` | AWS Lambda function fleet with deploy-time code updates |
 | `aws-lb/` | AWS Application / Network Load Balancer with listeners, target groups, and explicit ingress |

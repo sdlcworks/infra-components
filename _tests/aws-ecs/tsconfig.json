@@ -1,0 +1,12 @@
+{
+  "extends": "../../.js/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "types": ["bun"]
+  },
+  "include": [
+    "../../aws-ecs/index.ts",
+    "./*.ts"
+  ]
+}
