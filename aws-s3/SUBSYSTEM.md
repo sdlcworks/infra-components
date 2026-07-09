@@ -1,3 +1,4 @@
+---
 name: aws-s3
 
 definition: Provides one stable, infra-addressable, permanently non-public object store per subsystem instance. It exists because edge origins and apps need a component-granular object identity; without it, object storage would either be per-app allocation or publicly reachable policy surface.
@@ -17,3 +18,4 @@ outputs:
     description: App-facing object-store access meaning containing stable object-store coordinates.
   - name: object-store-identity
     description: Environment-visible identity and region meaning of the object store.
+---

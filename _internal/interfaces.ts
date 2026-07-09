@@ -62,6 +62,8 @@ export const InternalServiceCI = defineConnectionInterface(
   z.object({}),
   z.object({
     uri: z.string(),
+    host: z.string().optional(),
+    protocol: z.enum(["http", "https"]).optional(),
     serviceName: z.string().optional(),
     port: z.number().optional(),
     serviceAccountEmail: z.string().optional(),

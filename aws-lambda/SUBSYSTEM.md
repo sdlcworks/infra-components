@@ -1,3 +1,4 @@
+---
 name: aws-lambda
 
 definition: >
@@ -53,3 +54,4 @@ outputs:
   - name: function-fleet-identity
     description: >
       Environment-visible identities and endpoints of the provisioned functions.
+---

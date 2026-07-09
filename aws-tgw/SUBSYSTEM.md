@@ -1,3 +1,4 @@
+---
 name: aws-tgw
 
 definition: Provides an inter-network routing hub governed by explicit reachability policy. It exists to connect multiple network fabrics without creating an implicit any-to-any mesh; without it, attachments and return routes would be distributed across networks with no single routing invariant.
@@ -13,3 +14,4 @@ inputs:
 outputs:
   - name: interconnect-identity
     description: Environment-visible identity of the routing hub, its network attachments, and its routing policy surfaces.
+---

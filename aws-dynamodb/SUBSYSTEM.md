@@ -1,3 +1,4 @@
+---
 name: aws-dynamodb
 
 definition: Provides durable AWS-managed serverless tables with reviewed key schemas and app-selected access. It exists because key schema and recoverability choices are data-loss boundaries; without it, apps would select or reshape durable tables outside infrastructure review.
@@ -17,3 +18,4 @@ outputs:
     description: Data-store target meaning that compute subsystems can use to authorize access to declared tables.
   - name: table-store-identity
     description: Environment-visible identity and stream posture of the declared table store.
+---

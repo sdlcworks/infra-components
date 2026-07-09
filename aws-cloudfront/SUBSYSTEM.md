@@ -1,3 +1,4 @@
+---
 name: aws-cloudfront
 
 definition: Provides edge delivery for static and dynamic origins under explicit TLS, caching, and cost posture. It exists to make public edge access deliberate and to ensure object-store origins are reached only through the sanctioned edge path when such enforcement is available.
@@ -19,3 +20,4 @@ outputs:
     description: Public edge address meaning provided to apps and operators for reaching delivered content or applications.
   - name: edge-distribution-identity
     description: Environment-visible identity and operational status of the edge delivery surface.
+---

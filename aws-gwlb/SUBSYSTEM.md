@@ -1,3 +1,4 @@
+---
 name: aws-gwlb
 
 definition: Provides transparent insertion of declared inspection appliances into network traffic paths. It exists because inspection transit is not app exposure; without this subsystem, appliance routing and endpoint acceptance would be implicit, scattered, or conflated with ordinary load balancing.
@@ -15,3 +16,4 @@ inputs:
 outputs:
   - name: inspection-service-identity
     description: Environment-visible identity of the inspection service and the consumer-side insertion points it provides.
+---

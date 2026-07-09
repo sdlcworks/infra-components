@@ -1,3 +1,4 @@
+---
 name: aws-vpc
 
 definition: Provides the private AWS network fabric for branch infrastructure. It exists to make address architecture, placement tiers, routing surfaces, and egress cost posture explicit; without it, network-resident systems would inherit unsafe or costly provider defaults.
@@ -17,3 +18,4 @@ outputs:
     description: Network identity, endpoint placement, and routing surfaces needed to insert an inspection path into traffic flow.
   - name: network-fabric-identity
     description: Environment-visible identity and posture of the created network fabric.
+---
