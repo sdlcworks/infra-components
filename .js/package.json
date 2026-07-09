@@ -16,6 +16,7 @@
     "@pulumi/gcp": "^9.6.0",
     "@pulumi/hcloud": "^1.38.0",
     "@pulumi/kubernetes": "^4.28.0",
+    "@pulumi/mongodbatlas": "^4.11",
     "@pulumi/pulumi": "3.213.0",
     "@pulumi/tls": "^5.3.0",
     "@aws-sdk/client-ecr": "^3.978.0",

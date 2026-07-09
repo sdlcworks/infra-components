@@ -77,6 +77,7 @@ const component = new InfraComponent({
     privateRouteTableIds: z.array(z.string()),
     igwId: z.string().optional(),
     natGatewayIds: z.array(z.string()),
+    natEgressIps: z.array(z.string()),
   }),
 });
 
@@ -238,6 +239,7 @@ component.implement(CloudProvider.aws, {
     privateRouteTableIds: z.array(z.string()).optional(),
     igwId: z.string().optional(),
     natGatewayIds: z.array(z.string()).optional(),
+    natEgressIps: z.array(z.string()).optional(),
   }),
   initialState: {},
 
@@ -479,6 +481,7 @@ component.implement(CloudProvider.aws, {
       privateRouteTableIds: pulumi.all(privateRouteTables.map((routeTable) => routeTable.id)),
       igwId: internetGateway?.id,
       natGatewayIds: pulumi.all(natGateways.map((natGateway) => natGateway.id)),
+      natEgressIps: pulumi.all(eips.map((eip) => eip.publicIp)),
     };
 
     state.cidrBlockFingerprint = cidrBlock;
@@ -489,6 +492,7 @@ component.implement(CloudProvider.aws, {
     state.privateRouteTableIds = outputs.privateRouteTableIds;
     state.igwId = outputs.igwId;
     state.natGatewayIds = outputs.natGatewayIds;
+    state.natEgressIps = outputs.natEgressIps;
 
     return outputs;
   },

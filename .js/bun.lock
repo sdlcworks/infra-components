@@ -14,6 +14,7 @@
         "@pulumi/gcp": "^9.6.0",
         "@pulumi/hcloud": "^1.38.0",
         "@pulumi/kubernetes": "^4.28.0",
+        "@pulumi/mongodbatlas": "^4.11",
         "@pulumi/pulumi": "3.213.0",
         "@pulumi/tls": "^5.3.0",
         "@sdlcworks/components": "0.0.64",
@@ -200,6 +201,8 @@
     "@pulumi/hcloud": ["@pulumi/hcloud@1.38.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-fMJ0YpJgooigm9QRgmwkXx9c9+hG4tJXo8z2PKgU4y2X74ZHec5QBMF3ykEYGwoIfRVfCzNQyFVYf37SuOwkQQ=="],
 
     "@pulumi/kubernetes": ["@pulumi/kubernetes@4.28.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0", "glob": "^12.0.0", "shell-quote": "^1.6.1" } }, "sha512-tdoUN7blJv1rrwr+2Pc55CP/+L1sMkH3z5Y7DI2yfNiGgdeaOHYia+hYsnLgR4HtBSfIfuBVWxGkZwGWOgUmOQ=="],
+
+    "@pulumi/mongodbatlas": ["@pulumi/mongodbatlas@4.11.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-QAO8IMeoBGjyZmmuCqqucBqZ2XsfLqfrwRnfinxW7+ZHm52SlArmQjxTfzrLgvkPaz5SM2scdH3MQl+aIEdmRw=="],
 
     "@pulumi/pulumi": ["@pulumi/pulumi@3.213.0", "", { "dependencies": { "@grpc/grpc-js": "^1.10.1", "@logdna/tail-file": "^2.0.6", "@npmcli/arborist": "^7.3.1", "@opentelemetry/api": "^1.9", "@opentelemetry/exporter-zipkin": "^1.28", "@opentelemetry/instrumentation": "^0.55", "@opentelemetry/instrumentation-grpc": "^0.55", "@opentelemetry/resources": "^1.28", "@opentelemetry/sdk-trace-base": "^1.28", "@opentelemetry/sdk-trace-node": "^1.28", "@types/google-protobuf": "^3.15.5", "@types/semver": "^7.5.6", "@types/tmp": "^0.2.6", "execa": "^5.1.0", "fdir": "^6.1.1", "google-protobuf": "^3.21.4", "got": "^11.8.6", "ini": "^2.0.0", "js-yaml": "^3.14.2", "minimist": "^1.2.6", "normalize-package-data": "^6.0.0", "package-directory": "^8.1.0", "picomatch": "^3.0.1", "require-from-string": "^2.0.1", "semver": "^7.5.2", "source-map-support": "^0.5.6", "tmp": "^0.2.4", "upath": "^1.1.0" }, "peerDependencies": { "ts-node": ">= 7.0.1 < 12", "typescript": ">= 3.8.3 < 6" }, "optionalPeers": ["ts-node"] }, "sha512-qTAOJXQYjMse2oAwht4iuYA4TiSgUgDfGmlySf2xa4n34+eF1/ytCbF3UJdfOx9+yDD5mYBAi37t0OY/VyVzyQ=="],
 
