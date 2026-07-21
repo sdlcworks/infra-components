@@ -97,12 +97,28 @@ const register = new URLRegister({
       const ttl = resolveTtl(rcfg, config.defaults, proxied);
       const host = pulumi.output(metadata.host) as pulumi.Output<string>;
 
+      if (pulumi.Output.isInstance(metadata.requiredHost)) {
+        throw new Error(
+          `${LOG_PREFIX} component '${appName}' returned metadata.requiredHost as a pulumi Output; the addressing constraint must be a plan-time string`,
+        );
+      }
+      if (metadata.requiredHost && metadata.requiredHost !== fqdn) {
+        throw new Error(
+          `${LOG_PREFIX} component '${appName}' requires Host '${metadata.requiredHost}', but publication intent resolves to '${fqdn}'`,
+        );
+      }
+
       if (pulumi.Output.isInstance(metadata.originAddressed)) {
         throw new Error(
           `${LOG_PREFIX} component '${appName}' returned metadata.originAddressed as a pulumi Output; the addressing constraint must be a plan-time boolean`,
         );
       }
       const originAddressed = metadata.originAddressed === true;
+      if (metadata.requiredHost && originAddressed) {
+        throw new Error(
+          `${LOG_PREFIX} component '${appName}' declares both requiredHost and originAddressed; preserving the published Host and rewriting it to the origin are mutually exclusive`,
+        );
+      }
 
       if (originAddressed && !proxied) {
         throw new Error(

@@ -109,6 +109,16 @@ const register = new URLRegister({
       }
 
       const fqdn = `${rcfg.name}.${config.domain}`;
+      if (entry.metadata.requiredHost && entry.metadata.requiredHost !== fqdn) {
+        throw new Error(
+          `public-url: component '${appName}' requires Host '${entry.metadata.requiredHost}', but publication intent resolves to '${fqdn}'`,
+        );
+      }
+      if (entry.metadata.requiredHost && entry.metadata.originAddressed === true) {
+        throw new Error(
+          `public-url: component '${appName}' declares both requiredHost and originAddressed; preserving the published Host and rewriting it to the origin are mutually exclusive`,
+        );
+      }
       const originHost = pulumi.output(entry.metadata.host) as pulumi.Output<string>;
 
       if (rcfg.mode === "cloudflare-proxy") {
@@ -120,7 +130,9 @@ const register = new URLRegister({
           proxied: true,
           provider: cfProvider,
         });
-        proxiedRoutes.push({ appName, fqdn, originHost });
+        if (!entry.metadata.requiredHost) {
+          proxiedRoutes.push({ appName, fqdn, originHost });
+        }
         results[appName] = pulumi.interpolate`https://${fqdn}`;
         continue;
       }

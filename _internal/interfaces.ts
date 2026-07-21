@@ -247,6 +247,12 @@ export const PublicCI = defineConnectionInterface(
     appComponentType: z.string(),
     host: z.string(),
     /**
+     * Host header/name that the origin's routing rules require. When present,
+     * a downstream name publisher must publish exactly this host while using
+     * `host` as the DNS origin target.
+     */
+    requiredHost: z.string().optional(),
+    /**
      * Origin-addressed (host-locked) endpoint: the origin serves only
      * requests whose Host equals this endpoint's own provider-assigned
      * host. Absent ⇒ unconstrained. Downstream publishers that alias

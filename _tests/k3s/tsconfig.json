@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": [
+    "../../k3s/aws.ts",
+    "../../k3s/aws-secret.ts",
+    "./aws-ec2-intent.test.ts"
+  ]
+}

@@ -89,10 +89,10 @@ outputs:
     description: >
       App-facing public endpoint of a service whose staged-cutover
       distribution surface the fleet owns, emitted only where that posture
-      and public exposure are declared. The endpoint is not origin-addressed:
-      it serves requests addressed by custom public names, and it declares
-      the absence of that addressing constraint so downstream publishers know
-      pure name binding suffices; custom public names require the
+      and public exposure are declared. The endpoint is not origin-addressed and
+      carries no separate required request host: it accepts requests under
+      custom public names, so a downstream publisher may bind a name directly
+      without a re-addressing hop. Custom public names require the
       environment-provided certificate authority meaning.
   - name: mount-consumer-identity
     description: >

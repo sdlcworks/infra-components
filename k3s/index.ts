@@ -5,10 +5,12 @@ import {
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
+  type CloudCredentialAWS,
 } from "@sdlcworks/components";
 import { K3sInternalCI, PublicCI, R2BucketCI } from "../_internal/interfaces";
 
 import * as gcp from "@pulumi/gcp";
+import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import * as command from "@pulumi/command";
 import * as tls from "@pulumi/tls";
@@ -17,6 +19,16 @@ import * as k8s from "@pulumi/kubernetes";
 import * as yaml from "js-yaml";
 import { createHash } from "crypto";
 import * as https from "https";
+import {
+  AwsK3sConfigSchema,
+  awsNodeIngressPlan,
+  buildAwsDrainLambdaCode,
+  buildAwsK3sCloudInit,
+  buildAwsNodePolicy,
+  validateAwsEcrImage,
+  type AwsK3sConfig,
+} from "./aws";
+import { SecretValueWaiter } from "./aws-secret";
 
 // ---- Zod Enums for Config Options ----
 
@@ -493,7 +505,7 @@ const component = new InfraComponent({
   connectionTypes: {
     public: {
       description:
-        "exposes the app component via public HTTP on the cluster init server IP",
+        "exposes the app component through the cluster's reviewed public HTTP ingress",
       interface: PublicCI,
     },
     internal: {
@@ -730,6 +742,10 @@ const component = new InfraComponent({
     defaultNamespaceQuota: NamespaceQuotaSchema.optional().describe(
       "Default namespace-level resource quota applied to every allocated app component namespace",
     ),
+
+    aws: AwsK3sConfigSchema.optional().describe(
+      "AWS-only private EC2 fleet, placement, availability, and admission posture. Required for the AWS realization.",
+    ),
   }),
   appComponentTypes: {
     "tcp-service": TcpServiceDeployConfigSchema,
@@ -739,6 +755,8 @@ const component = new InfraComponent({
   outputSchema: z.object({
     // k8s API server endpoint — https://<init-server-ip>:6443
     apiServerUrl: z.string(),
+    cloudProvider: z.enum(["gcloud", "aws"]).optional(),
+    region: z.string().optional(),
     // Per-node outputs keyed by node name.
     nodes: z.record(
       z.string(),
@@ -751,6 +769,19 @@ const component = new InfraComponent({
         externalIp: z.string().optional(),
       }),
     ),
+    agentPools: z
+      .record(
+        z.string(),
+        z.object({
+          autoScalingGroupName: z.string(),
+          launchTemplateId: z.string(),
+          minSize: z.number(),
+          desiredSize: z.number(),
+          maxSize: z.number(),
+        }),
+      )
+      .optional(),
+    publicEndpointHost: z.string().optional(),
   }),
 });
 
@@ -764,6 +795,8 @@ component.implement(CloudProvider.gcloud, {
     // https://<init-server-ip>:6443 — also encoded in the kubeconfig but kept
     // separately so later lifecycle hooks can reference it cheaply.
     apiServerUrl: z.string(),
+    cloudProvider: z.enum(["gcloud", "aws"]).optional(),
+    publicEndpointHost: z.string().optional(),
     // Per-node SSH private keys (each node gets its own key).
     sshKeys: z.record(z.string(), z.string()),
     // Per-node IP info.
@@ -804,6 +837,9 @@ component.implement(CloudProvider.gcloud, {
           dbUser: z.string().optional(),
           dbPassword: z.string().optional(),
           postgresClusterName: z.string().optional(),
+          public: z.boolean().optional(),
+          requiredHost: z.string().optional(),
+          publicProtocol: z.enum(["http", "https"]).optional(),
         }),
       )
       .default({}),
@@ -1529,6 +1565,7 @@ component.implement(CloudProvider.gcloud, {
 
     state.kubeconfig = kubeconfigCmd.stdout;
     state.apiServerUrl = apiServerUrl;
+    state.cloudProvider = "gcloud";
 
     // Store per-node SSH keys and IPs.
     if (!state.sshKeys || typeof state.sshKeys !== "object") {
@@ -2063,8 +2100,14 @@ loki.write "grafana_cloud" {
     const registryHost = (buildArtifact?.artifact as any)?.uri?.split("/")[0] as
       | string
       | undefined;
+    if (state.cloudProvider === "aws" && buildArtifact?.artifact.uri) {
+      validateAwsEcrImage(
+        buildArtifact.artifact.uri,
+        ((state as any).ecrRepositoryArns ?? []) as string[],
+      );
+    }
     const imagePullSecretName = `ar-pull-${name}`;
-    const imagePullSecrets = registryHost
+    const imagePullSecrets = registryHost && state.cloudProvider !== "aws"
       ? [{ name: imagePullSecretName }]
       : undefined;
 
@@ -2077,7 +2120,7 @@ loki.write "grafana_cloud" {
       : opts;
 
     const createImagePullSecret = (namespaceName: string): k8s.core.v1.Secret | undefined => {
-      if (!registryHost) return undefined;
+      if (!registryHost || state.cloudProvider === "aws") return undefined;
       const creds = getCredentials();
       return new k8s.core.v1.Secret(
         $`ar-pull-${name}`,
@@ -2125,7 +2168,8 @@ loki.write "grafana_cloud" {
         dbName?: string;
         dbUser?: string;
         dbPassword?: string;
-        postgresClusterName?: string;
+      postgresClusterName?: string;
+        public?: boolean;
       };
       (state.allocations as Record<string, AllocEntry>)[name] = {
         appComponentType,
@@ -2136,6 +2180,7 @@ loki.write "grafana_cloud" {
         dbUser: clusterConfig.dbUser,
         dbPassword: clusterConfig.dbPassword,
         postgresClusterName: clusterName,
+        public: false,
       };
 
       return;
@@ -2350,12 +2395,30 @@ loki.write "grafana_cloud" {
       workloadType: string;
       namespace: any;
       servicePort?: number;
+      public?: boolean;
+      requiredHost?: string;
+      publicProtocol?: "http" | "https";
     };
+    const ingress =
+      workloadConfig.workloadType === "deployment"
+        ? (workloadConfig as DeploymentConfig).ingress
+        : undefined;
+    const requiredHost = ingress?.rules[0]?.host;
+    const publicProtocol =
+      requiredHost &&
+      ingress?.tls?.some((entry) => entry.hosts.includes(requiredHost))
+        ? "https"
+        : requiredHost
+          ? "http"
+          : undefined;
     (state.allocations as Record<string, AllocEntry>)[name] = {
       appComponentType,
       workloadType: workloadConfig.workloadType,
       namespace: namespaceName,
       servicePort: allocServicePort,
+      public: Boolean(ingress),
+      requiredHost,
+      publicProtocol,
     };
   },
 
@@ -2404,6 +2467,13 @@ loki.write "grafana_cloud" {
 
       const { workloadType, namespace, appComponentType } = allocation;
       const imageUri = artifactInfo.artifact.uri;
+
+      if (state.cloudProvider === "aws") {
+        validateAwsEcrImage(
+          imageUri,
+          ((state as any).ecrRepositoryArns ?? []) as string[],
+        );
+      }
 
       if (appComponentType && operatorManagedTypes.has(appComponentType)) {
         console.error(
@@ -2478,6 +2548,9 @@ loki.write "grafana_cloud" {
           dbUser?: string;
           dbPassword?: string;
           postgresClusterName?: string;
+          public?: boolean;
+          requiredHost?: string;
+          publicProtocol?: "http" | "https";
         };
         const allocations = (state.allocations ?? {}) as Record<string, Alloc>;
         const alloc = allocations[selfComponentName];
@@ -2552,10 +2625,10 @@ loki.write "grafana_cloud" {
           { internalIp: string; externalIp?: string }
         >;
         const initServerEntry = Object.values(nodeIps)[0];
-        const ip = initServerEntry?.externalIp;
+        const ip = state.publicEndpointHost ?? initServerEntry?.externalIp;
         if (!ip) {
           throw new Error(
-            "k3s: externalIp is not set on the init server node; ensure the node config assigns an external IP",
+            "k3s: no public workload endpoint is configured for this cluster",
           );
         }
 
@@ -2567,6 +2640,9 @@ loki.write "grafana_cloud" {
           dbUser?: string;
           dbPassword?: string;
           postgresClusterName?: string;
+          public?: boolean;
+          requiredHost?: string;
+          publicProtocol?: "http" | "https";
         };
         const allocations = (state.allocations ?? {}) as Record<string, Alloc>;
         const alloc = allocations[selfComponentName];
@@ -2576,12 +2652,27 @@ loki.write "grafana_cloud" {
               `Ensure allocateWithPulumiCtx has run for this component before connections are resolved.`,
           );
         }
+        if (state.cloudProvider === "aws" && !alloc.public) {
+          throw new Error(
+            `k3s (aws): component '${selfComponentName}' has no reviewed Kubernetes Ingress and cannot use the public workload endpoint`,
+          );
+        }
+        if (alloc.public && !alloc.requiredHost) {
+          throw new Error(
+            `k3s: component '${selfComponentName}' has public ingress without a required host`,
+          );
+        }
 
         const portSuffix =
           alloc.servicePort != null ? `:${alloc.servicePort}` : "";
 
         switch (alloc.appComponentType) {
           case "tcp-service":
+            if (state.cloudProvider === "aws") {
+              throw new Error(
+                "k3s (aws): public TCP services require an explicitly declared workload listener; only HTTP ingress is currently exposed",
+              );
+            }
             return {
               uri: pulumi.interpolate`${ip}${portSuffix}`,
               metadata: {
@@ -2592,6 +2683,33 @@ loki.write "grafana_cloud" {
               },
             };
           case "http-service":
+            if (state.cloudProvider === "aws") {
+              const protocol = alloc.publicProtocol ?? "http";
+              const port = protocol === "https" ? 443 : 80;
+              return {
+                uri: pulumi.output(`${protocol}://${alloc.requiredHost}`),
+                metadata: {
+                  appComponentType: "http-service",
+                  host: ip,
+                  requiredHost: alloc.requiredHost,
+                  port,
+                  protocol,
+                },
+              };
+            }
+            if (alloc.requiredHost) {
+              const protocol = alloc.publicProtocol ?? "http";
+              return {
+                uri: pulumi.output(`${protocol}://${alloc.requiredHost}`),
+                metadata: {
+                  appComponentType: "http-service",
+                  host: ip,
+                  requiredHost: alloc.requiredHost,
+                  port: protocol === "https" ? 443 : 80,
+                  protocol,
+                },
+              };
+            }
             return {
               uri: pulumi.interpolate`http://${ip}${portSuffix}`,
               metadata: {
@@ -2602,6 +2720,11 @@ loki.write "grafana_cloud" {
               },
             };
           case "postgres":
+            if (state.cloudProvider === "aws") {
+              throw new Error(
+                "k3s (aws): postgres remains cluster-internal and is not exposed through the public workload surface",
+              );
+            }
             return {
               uri: pulumi.interpolate`postgresql://${encodeURIComponent(alloc.dbUser ?? "")}:${encodeURIComponent(alloc.dbPassword ?? "")}@${ip}:${alloc.servicePort ?? 5432}/${encodeURIComponent(alloc.dbName ?? "")}?sslmode=disable`,
               metadata: {
@@ -2622,6 +2745,1203 @@ loki.write "grafana_cloud" {
     }),
   ]) as any,
 });
+
+// ---- AWS Provider Implementation ----
+
+type AwsCredentials = CloudCredentialAWS & {
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
+  AWS_SESSION_TOKEN?: string;
+  AWS_REGION: string;
+};
+
+const EC2_SERVICE_PRINCIPAL = "ec2.amazonaws.com";
+const SSM_MANAGED_POLICY_ARN =
+  "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
+const CANONICAL_AMI_NAMES = {
+  x86_64: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
+  arm64: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*",
+} as const;
+// Bump only when an explicit cluster migration is required for fixed servers.
+const AWS_SERVER_BOOTSTRAP_REVISION = 1;
+
+function requireAwsCredentials(value: CloudCredentialAWS): AwsCredentials {
+  const credentials = value as AwsCredentials;
+  if (
+    !credentials?.AWS_ACCESS_KEY_ID ||
+    !credentials?.AWS_SECRET_ACCESS_KEY ||
+    !credentials?.AWS_REGION
+  ) {
+    throw new Error(
+      "k3s (aws): AWS credentials must include AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION",
+    );
+  }
+  return credentials;
+}
+
+const sharedK3sLifecycle = component.providers[CloudProvider.gcloud]!;
+
+component.implement(CloudProvider.aws, ({
+  stateSchema: z.object({
+    kubeconfig: z.string(),
+    apiServerUrl: z.string(),
+    cloudProvider: z.enum(["gcloud", "aws"]).optional(),
+    publicEndpointHost: z.string().optional(),
+    sshKeys: z.record(z.string(), z.string()),
+    nodeIps: z.record(
+      z.string(),
+      z.object({
+        internalIp: z.string(),
+        externalIp: z.string().optional(),
+      }),
+    ),
+    defaultResourceLimits: ResourceQuantitySchema.optional(),
+    defaultResourceRequests: ResourceQuantitySchema.optional(),
+    defaultNamespaceQuota: NamespaceQuotaSchema.optional(),
+    serverTopologyFingerprint: z.string().optional(),
+    serverRuntimeFingerprint: z.string().optional(),
+    agentPoolDesiredSizes: z.record(z.string(), z.number()).optional(),
+    ecrRepositoryArns: z.array(z.string()).optional(),
+    allocations: z
+      .record(
+        z.string(),
+        z.object({
+          appComponentType: z.string(),
+          workloadType: z.enum([
+            "deployment",
+            "stateful-set",
+            "cron-job",
+            "job",
+            "daemon-set",
+          ]),
+          namespace: z.string(),
+          servicePort: z.number().optional(),
+          dbName: z.string().optional(),
+          dbUser: z.string().optional(),
+          dbPassword: z.string().optional(),
+          postgresClusterName: z.string().optional(),
+          public: z.boolean().optional(),
+          requiredHost: z.string().optional(),
+          publicProtocol: z.enum(["http", "https"]).optional(),
+        }),
+      )
+      .default({}),
+  }),
+  initialState: {
+    sshKeys: {},
+    nodeIps: {},
+  },
+
+  pulumi: async (ctx: any) => {
+    const { $, inputs, state, getCredentials, aws: awsProvider } = ctx;
+    if (!inputs.aws) {
+      throw new Error("k3s (aws): config.aws is required");
+    }
+    const config = AwsK3sConfigSchema.parse(inputs.aws) as AwsK3sConfig;
+    const serverTopologyFingerprint = createHash("sha256")
+      .update(JSON.stringify({
+        vpcId: config.vpcId,
+        count: config.servers.count,
+        privateSubnetIds: config.privateSubnetIds,
+        controlPlanePublic: config.controlPlane.public,
+        controlSubnets: config.controlPlane.public
+          ? config.publicSubnetIds
+          : config.privateSubnetIds,
+      }))
+      .digest("hex");
+    if (
+      state.serverTopologyFingerprint &&
+      state.serverTopologyFingerprint !== serverTopologyFingerprint
+    ) {
+      throw new Error(
+        "k3s (aws): changing the server VPC, count, placement, or control-plane exposure in place is unsafe; explicitly migrate the cluster",
+      );
+    }
+    state.serverTopologyFingerprint = serverTopologyFingerprint;
+    const serverRuntimeFingerprint = createHash("sha256")
+      .update(JSON.stringify({
+        bootstrapRevision: AWS_SERVER_BOOTSTRAP_REVISION,
+        amiOwner: config.amiOwner,
+        servers: config.servers,
+        k3sVersion: inputs.k3sVersion,
+        k3sChannel: inputs.k3sChannel,
+        clusterCidr: inputs.clusterCidr,
+        serviceCidr: inputs.serviceCidr,
+        clusterDns: inputs.clusterDns,
+        tlsSan: inputs.tlsSan,
+        disableTraefik: inputs.disableTraefik,
+        disableServiceLb: inputs.disableServiceLb,
+        disableLocalStorage: inputs.disableLocalStorage,
+        disableMetricsServer: inputs.disableMetricsServer,
+        disableCoredns: inputs.disableCoredns,
+        k3sInstallFlags: inputs.k3sInstallFlags,
+      }))
+      .digest("hex");
+    if (
+      state.serverRuntimeFingerprint &&
+      state.serverRuntimeFingerprint !== serverRuntimeFingerprint
+    ) {
+      throw new Error(
+        "k3s (aws): fixed-server runtime changes require an explicit cluster migration; automatic EC2 replacement is unsafe for embedded etcd",
+      );
+    }
+    state.serverRuntimeFingerprint = serverRuntimeFingerprint;
+    const priorAgentPoolDesiredSizes = (state.agentPoolDesiredSizes ?? {}) as Record<
+      string,
+      number
+    >;
+    const removedActiveAgentPools = Object.entries(priorAgentPoolDesiredSizes)
+      .filter(([name, desired]) => !(name in config.agentPools) && desired !== 0)
+      .map(([name]) => name);
+    if (removedActiveAgentPools.length > 0) {
+      throw new Error(
+        `k3s (aws): scale agent pools to minSize=0 and desiredSize=0 before removing them so lifecycle draining remains active: ${removedActiveAgentPools.join(", ")}`,
+      );
+    }
+    if (inputs.enableCloudController) {
+      throw new Error(
+        "k3s (aws): enableCloudController is GCP-only; AWS traffic surfaces are component-owned",
+      );
+    }
+    if (config.workloadIngress.enabled && inputs.disableTraefik) {
+      throw new Error(
+        "k3s (aws): workloadIngress requires the built-in Traefik controller",
+      );
+    }
+    if (config.workloadIngress.enabled && inputs.disableServiceLb) {
+      throw new Error(
+        "k3s (aws): workloadIngress requires the built-in ServiceLB",
+      );
+    }
+    if (inputs.monitoring.enabled && inputs.monitoring.mode === "hosted") {
+      throw new Error(
+        "k3s (aws): hosted Grafana monitoring is not yet supported; use self-hosted mode",
+      );
+    }
+    if (Object.keys(inputs.postgresClusterConfig).length > 0) {
+      throw new Error(
+        "k3s (aws): postgresClusterConfig requires durable network storage, which the AWS realization does not yet provision",
+      );
+    }
+
+    const credentials = requireAwsCredentials(getCredentials());
+    const awsOpts: pulumi.CustomResourceOptions = awsProvider
+      ? { provider: awsProvider }
+      : {};
+    const privateSubnetInfo = config.privateSubnetIds.map((id) =>
+      aws.ec2.getSubnetOutput({ id }, awsOpts),
+    );
+    const validatedPrivateSubnetIds = pulumi
+      .all(privateSubnetInfo.map((subnet) =>
+        pulumi.all([subnet.id, subnet.vpcId, subnet.availabilityZone, subnet.mapPublicIpOnLaunch]),
+      ))
+      .apply((subnets) => {
+        for (const [id, vpcId, , mapsPublicIp] of subnets) {
+          if (vpcId !== config.vpcId) {
+            throw new Error(`k3s (aws): private subnet ${id} does not belong to ${config.vpcId}`);
+          }
+          if (mapsPublicIp) {
+            throw new Error(`k3s (aws): private subnet ${id} maps public IPs on launch`);
+          }
+        }
+        if (
+          config.servers.count >= 3 &&
+          new Set(subnets.map(([, , zone]) => zone)).size < 3
+        ) {
+          throw new Error("k3s (aws): HA servers require private subnets in at least three availability zones");
+        }
+        return config.privateSubnetIds;
+      });
+    const publicSubnetInfo = config.publicSubnetIds.map((id) =>
+      aws.ec2.getSubnetOutput({ id }, awsOpts),
+    );
+    const validatedPublicSubnetIds = pulumi
+      .all(publicSubnetInfo.map((subnet) =>
+        pulumi.all([subnet.id, subnet.vpcId, subnet.availabilityZone]),
+      ))
+      .apply((subnets) => {
+        for (const [id, vpcId] of subnets) {
+          if (vpcId !== config.vpcId) {
+            throw new Error(`k3s (aws): public subnet ${id} does not belong to ${config.vpcId}`);
+          }
+        }
+        if (
+          subnets.length >= 2 &&
+          new Set(subnets.map(([, , zone]) => zone)).size < 2
+        ) {
+          throw new Error("k3s (aws): public load balancers require subnets in at least two availability zones");
+        }
+        return config.publicSubnetIds;
+      });
+    const baseTags = {
+      ...config.labels,
+      "sdlc.works/component": "k3s",
+    };
+    const resourceTags = (name: string) => ({ ...baseTags, Name: name });
+
+    const tokenKey = new tls.PrivateKey($`aws-cluster-token-key`, {
+      algorithm: "ED25519",
+    });
+    const clusterToken = tokenKey.privateKeyOpenssh.apply((key) =>
+      createHash("sha256").update(key).digest("hex"),
+    );
+    const clusterTokenSecret = new aws.secretsmanager.Secret(
+      $`cluster-token`,
+      {
+        description: "k3s cluster join token managed by sdlc.works",
+        recoveryWindowInDays: 0,
+        tags: resourceTags($`cluster-token`),
+      },
+      awsOpts,
+    );
+    const clusterTokenVersion = new aws.secretsmanager.SecretVersion(
+      $`cluster-token-value`,
+      {
+        secretId: clusterTokenSecret.id,
+        secretString: pulumi.secret(clusterToken),
+      },
+      awsOpts,
+    );
+    const kubeconfigSecret = new aws.secretsmanager.Secret(
+      $`admin-kubeconfig`,
+      {
+        description: "Protected administrative kubeconfig for the k3s cluster",
+        recoveryWindowInDays: 0,
+        tags: resourceTags($`admin-kubeconfig`),
+      },
+      awsOpts,
+    );
+    const bootstrapMarkerSecret = new aws.secretsmanager.Secret(
+      $`bootstrap-marker`,
+      {
+        description: "External marker preventing an existing k3s cluster from being re-initialized",
+        recoveryWindowInDays: 0,
+        tags: resourceTags($`bootstrap-marker`),
+      },
+      awsOpts,
+    );
+
+    const assumeRolePolicy = JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Principal: { Service: EC2_SERVICE_PRINCIPAL },
+          Action: "sts:AssumeRole",
+        },
+      ],
+    });
+
+    const createNodeIdentity = (
+      roleName: "bootstrap-server" | "server" | "agent",
+      mayBootstrapCluster: boolean,
+      mayPublishKubeconfig: boolean,
+      maySignalLifecycle = false,
+    ) => {
+      const role = new aws.iam.Role(
+        $`${roleName}-role`,
+        {
+          assumeRolePolicy,
+          tags: resourceTags($`${roleName}-role`),
+        },
+        awsOpts,
+      );
+      const inlinePolicy = new aws.iam.RolePolicy(
+        $`${roleName}-policy`,
+        {
+          role: role.id,
+          policy: pulumi
+            .all([clusterTokenSecret.arn, kubeconfigSecret.arn, bootstrapMarkerSecret.arn])
+            .apply(([clusterTokenSecretArn, kubeconfigSecretArn, bootstrapMarkerSecretArn]) =>
+              JSON.stringify(
+                buildAwsNodePolicy({
+                  clusterTokenSecretArn,
+                  kubeconfigSecretArn,
+                  bootstrapMarkerSecretArn,
+                  mayBootstrapCluster,
+                  mayPublishKubeconfig,
+                  maySignalLifecycle,
+                  ecrRepositoryArns: config.ecrRepositoryArns,
+                }),
+              ),
+            ),
+        },
+        awsOpts,
+      );
+      const ssmPolicy = new aws.iam.RolePolicyAttachment(
+        $`${roleName}-ssm`,
+        { role: role.name, policyArn: SSM_MANAGED_POLICY_ARN },
+        awsOpts,
+      );
+      const profile = new aws.iam.InstanceProfile(
+        $`${roleName}-profile`,
+        {
+          role: role.name,
+          tags: resourceTags($`${roleName}-profile`),
+        },
+        awsOpts,
+      );
+      return { role, inlinePolicy, ssmPolicy, profile };
+    };
+
+    const bootstrapServerIdentity = createNodeIdentity("bootstrap-server", true, true);
+    const serverIdentity = createNodeIdentity("server", false, false);
+    const agentIdentity = createNodeIdentity("agent", false, false, true);
+
+    const serverSg = new aws.ec2.SecurityGroup(
+      $`server-sg`,
+      {
+        vpcId: config.vpcId,
+        description: "k3s fixed server nodes",
+        revokeRulesOnDelete: true,
+        egress: [
+          {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            cidrBlocks: ["0.0.0.0/0"],
+            description: "Routed egress for bootstrap and cluster operation",
+          },
+        ],
+        tags: resourceTags($`server-sg`),
+      },
+      awsOpts,
+    );
+    const agentSg = new aws.ec2.SecurityGroup(
+      $`agent-sg`,
+      {
+        vpcId: config.vpcId,
+        description: "k3s replaceable agent nodes",
+        revokeRulesOnDelete: true,
+        egress: [
+          {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            cidrBlocks: ["0.0.0.0/0"],
+            description: "Routed egress for bootstrap and workloads",
+          },
+        ],
+        tags: resourceTags($`agent-sg`),
+      },
+      awsOpts,
+    );
+    const controlLbSg = new aws.ec2.SecurityGroup(
+      $`control-lb-sg`,
+      {
+        vpcId: config.vpcId,
+        description: "Stable k3s control-plane admission",
+        revokeRulesOnDelete: true,
+        egress: [
+          {
+            protocol: "tcp",
+            fromPort: 6443,
+            toPort: 6443,
+            securityGroups: [serverSg.id],
+            description: "Kubernetes API to server nodes",
+          },
+        ],
+        tags: resourceTags($`control-lb-sg`),
+      },
+      awsOpts,
+    );
+
+    for (const [sourceName, sourceSg] of [
+      ["server", serverSg],
+      ["agent", agentSg],
+    ] as const) {
+      new aws.ec2.SecurityGroupRule(
+        $`control-from-${sourceName}`,
+        {
+          type: "ingress",
+          protocol: "tcp",
+          fromPort: 6443,
+          toPort: 6443,
+          securityGroupId: controlLbSg.id,
+          sourceSecurityGroupId: sourceSg.id,
+          description: `Stable registration from ${sourceName} nodes`,
+        },
+        awsOpts,
+      );
+    }
+    if (config.controlPlane.allowedCidrs.length > 0) {
+      new aws.ec2.SecurityGroupRule(
+        $`control-from-cidrs`,
+        {
+          type: "ingress",
+          protocol: "tcp",
+          fromPort: 6443,
+          toPort: 6443,
+          securityGroupId: controlLbSg.id,
+          cidrBlocks: config.controlPlane.allowedCidrs,
+          description: "Reviewed administrative Kubernetes API admission",
+        },
+        awsOpts,
+      );
+    }
+
+    let workloadLbSg: aws.ec2.SecurityGroup | undefined;
+    if (config.workloadIngress.enabled) {
+      workloadLbSg = new aws.ec2.SecurityGroup(
+        $`workload-lb-sg`,
+        {
+          vpcId: config.vpcId,
+          description: "Public k3s workload admission",
+          revokeRulesOnDelete: true,
+          egress: [
+            {
+              protocol: "-1",
+              fromPort: 0,
+              toPort: 0,
+              cidrBlocks: ["0.0.0.0/0"],
+              description: "Traffic to admitted workload targets",
+            },
+          ],
+          tags: resourceTags($`workload-lb-sg`),
+        },
+        awsOpts,
+      );
+      for (const port of [80, 443]) {
+        new aws.ec2.SecurityGroupRule(
+          $`workload-ingress-${port}`,
+          {
+            type: "ingress",
+            protocol: "tcp",
+            fromPort: port,
+            toPort: port,
+            securityGroupId: workloadLbSg.id,
+            cidrBlocks: config.workloadIngress.allowedCidrs,
+            description: `Reviewed public workload admission on TCP ${port}`,
+          },
+          awsOpts,
+        );
+      }
+    }
+
+    const drainLambdaSg = new aws.ec2.SecurityGroup(
+      $`drain-lambda-sg`,
+      {
+        vpcId: config.vpcId,
+        description: "Kubernetes API egress for controlled agent draining",
+        revokeRulesOnDelete: true,
+        egress: [
+          {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            cidrBlocks: ["0.0.0.0/0"],
+            description: "Kubernetes and AWS API access through routed egress",
+          },
+        ],
+        tags: resourceTags($`drain-lambda-sg`),
+      },
+      awsOpts,
+    );
+    new aws.ec2.SecurityGroupRule(
+      $`control-from-drain-lambda`,
+      {
+        type: "ingress",
+        protocol: "tcp",
+        fromPort: 6443,
+        toPort: 6443,
+        securityGroupId: controlLbSg.id,
+        sourceSecurityGroupId: drainLambdaSg.id,
+        description: "Kubernetes API for controlled agent draining",
+      },
+      awsOpts,
+    );
+
+    const drainRole = new aws.iam.Role(
+      $`drain-role`,
+      {
+        assumeRolePolicy: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "lambda.amazonaws.com" },
+              Action: "sts:AssumeRole",
+            },
+          ],
+        }),
+        tags: resourceTags($`drain-role`),
+      },
+      awsOpts,
+    );
+    const drainVpcPolicy = new aws.iam.RolePolicyAttachment(
+      $`drain-vpc-policy`,
+      {
+        role: drainRole.name,
+        policyArn:
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+      },
+      awsOpts,
+    );
+    const drainPolicy = new aws.iam.RolePolicy(
+      $`drain-policy`,
+      {
+        role: drainRole.id,
+        policy: kubeconfigSecret.arn.apply((kubeconfigSecretArn) =>
+          JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: "secretsmanager:GetSecretValue",
+                Resource: kubeconfigSecretArn,
+              },
+              {
+                Effect: "Allow",
+                Action: "autoscaling:CompleteLifecycleAction",
+                Resource: "*",
+              },
+            ],
+          }),
+        ),
+      },
+      awsOpts,
+    );
+    const drainFunction = new aws.lambda.Function(
+      $`drain-agent`,
+      {
+        role: drainRole.arn,
+        runtime: "nodejs22.x",
+        handler: "index.handler",
+        timeout: 840,
+        memorySize: 256,
+        code: new pulumi.asset.AssetArchive({
+          "index.js": new pulumi.asset.StringAsset(
+            buildAwsDrainLambdaCode(),
+          ),
+        }),
+        environment: {
+          variables: {
+            KUBECONFIG_SECRET_ARN: kubeconfigSecret.arn,
+          },
+        },
+        vpcConfig: {
+          subnetIds: validatedPrivateSubnetIds,
+          securityGroupIds: [drainLambdaSg.id],
+        },
+        tags: resourceTags($`drain-agent`),
+      },
+      {
+        ...awsOpts,
+        dependsOn: [drainPolicy, drainVpcPolicy],
+      },
+    );
+
+    const securityGroups = {
+      server: serverSg,
+      agent: agentSg,
+      "control-load-balancer": controlLbSg,
+      "workload-load-balancer": workloadLbSg,
+    } as const;
+    const nodeIngress = awsNodeIngressPlan({
+      controlPlaneAllowedCidrs: config.controlPlane.allowedCidrs,
+      workloadIngressEnabled: config.workloadIngress.enabled,
+    });
+    nodeIngress.forEach((rule, index) => {
+      const sourceSg = securityGroups[rule.sourceKind as keyof typeof securityGroups];
+      if (!sourceSg) return;
+      new aws.ec2.SecurityGroupRule(
+        $`node-ingress-${index + 1}`,
+        {
+          type: "ingress",
+          protocol: rule.protocol,
+          fromPort: rule.fromPort,
+          toPort: rule.toPort,
+          securityGroupId: securityGroups[rule.target].id,
+          sourceSecurityGroupId: sourceSg.id,
+          description: rule.description,
+        },
+        awsOpts,
+      );
+    });
+
+    const controlSubnets = config.controlPlane.public
+      ? validatedPublicSubnetIds
+      : validatedPrivateSubnetIds;
+    const controlLb = new aws.lb.LoadBalancer(
+      $`control-nlb`,
+      {
+        internal: !config.controlPlane.public,
+        loadBalancerType: "network",
+        securityGroups: [controlLbSg.id],
+        subnets: controlSubnets,
+        enableCrossZoneLoadBalancing: true,
+        tags: resourceTags($`control-nlb`),
+      },
+      awsOpts,
+    );
+    const controlTargetGroup = new aws.lb.TargetGroup(
+      $`control-targets`,
+      {
+        vpcId: config.vpcId,
+        port: 6443,
+        protocol: "TCP",
+        targetType: "instance",
+        preserveClientIp: "false",
+        healthCheck: { protocol: "TCP", port: "6443" },
+        tags: resourceTags($`control-targets`),
+      },
+      awsOpts,
+    );
+    const controlListener = new aws.lb.Listener(
+      $`control-listener`,
+      {
+        loadBalancerArn: controlLb.arn,
+        port: 6443,
+        protocol: "TCP",
+        defaultActions: [{ type: "forward", targetGroupArn: controlTargetGroup.arn }],
+        tags: resourceTags($`control-listener`),
+      },
+      awsOpts,
+    );
+    const apiServerUrl = pulumi.interpolate`https://${controlLb.dnsName}:6443`;
+
+    let workloadLb: aws.lb.LoadBalancer | undefined;
+    const workloadTargetGroups: aws.lb.TargetGroup[] = [];
+    if (workloadLbSg) {
+      workloadLb = new aws.lb.LoadBalancer(
+        $`workload-nlb`,
+        {
+          internal: false,
+          loadBalancerType: "network",
+          securityGroups: [workloadLbSg.id],
+          subnets: validatedPublicSubnetIds,
+          enableCrossZoneLoadBalancing: true,
+          tags: resourceTags($`workload-nlb`),
+        },
+        awsOpts,
+      );
+      for (const port of [80, 443]) {
+        const targetGroup = new aws.lb.TargetGroup(
+          $`workload-targets-${port}`,
+          {
+            vpcId: config.vpcId,
+            port,
+            protocol: "TCP",
+            targetType: "instance",
+            healthCheck: { protocol: "TCP", port: String(port) },
+            tags: resourceTags($`workload-targets-${port}`),
+          },
+          awsOpts,
+        );
+        workloadTargetGroups.push(targetGroup);
+        new aws.lb.Listener(
+          $`workload-listener-${port}`,
+          {
+            loadBalancerArn: workloadLb.arn,
+            port,
+            protocol: "TCP",
+            defaultActions: [{ type: "forward", targetGroupArn: targetGroup.arn }],
+            tags: resourceTags($`workload-listener-${port}`),
+          },
+          awsOpts,
+        );
+      }
+    }
+
+    const clusterFlags = [
+      `--cluster-cidr=${inputs.clusterCidr}`,
+      `--service-cidr=${inputs.serviceCidr}`,
+      `--cluster-dns=${inputs.clusterDns}`,
+      ...(inputs.disableTraefik ? ["--disable=traefik"] : []),
+      ...(inputs.disableServiceLb ? ["--disable=servicelb"] : []),
+      ...(inputs.disableLocalStorage ? ["--disable=local-storage"] : []),
+      ...(inputs.disableMetricsServer ? ["--disable=metrics-server"] : []),
+      ...(inputs.disableCoredns ? ["--disable=coredns"] : []),
+      ...inputs.k3sInstallFlags,
+    ];
+    const resolveAmi = (
+      architecture: "x86_64" | "arm64",
+      amiId: string | undefined,
+    ) => aws.ec2.getAmiOutput(
+        amiId ? {
+          mostRecent: false,
+          filters: [{ name: "image-id", values: [amiId] }],
+        } : {
+          mostRecent: true,
+          owners: [config.amiOwner],
+          filters: [
+            { name: "name", values: [CANONICAL_AMI_NAMES[architecture]] },
+            { name: "architecture", values: [architecture] },
+            { name: "virtualization-type", values: ["hvm"] },
+          ],
+        },
+        awsOpts,
+      );
+
+    const serverInstances: aws.ec2.Instance[] = [];
+    const controlAttachments: aws.lb.TargetGroupAttachment[] = [];
+    const serverNodeOutputs: Array<pulumi.Output<{
+      name: string;
+      instanceId: string;
+      arn: string;
+      zone: string;
+      internalIp: string;
+    }>> = [];
+    for (let index = 0; index < config.servers.count; index++) {
+      const nodeName = `server-${index + 1}`;
+      const nodeLabels = [
+        "sdlc.works/machine-group=servers",
+        "sdlc.works/k3s-role=server",
+        ...Object.entries(config.servers.labels).map(([key, value]) => `${key}=${value}`),
+      ];
+      const userData = pulumi
+        .all([
+          controlLb.dnsName,
+          clusterTokenSecret.arn,
+          kubeconfigSecret.arn,
+          bootstrapMarkerSecret.arn,
+        ])
+        .apply(([controlHost, clusterTokenSecretArn, kubeconfigSecretArn, bootstrapMarkerSecretArn]) =>
+          buildAwsK3sCloudInit({
+            nodeRole: index === 0 ? "init-server" : "server",
+            isHa: config.servers.count > 1,
+            version: inputs.k3sVersion,
+            channel: inputs.k3sChannel,
+            clusterTokenSecretArn,
+            kubeconfigSecretArn,
+            bootstrapMarkerSecretArn,
+            expectedServerCount: config.servers.count,
+            region: credentials.AWS_REGION,
+            joinUrl: `https://${controlHost}:6443`,
+            tlsSans: [controlHost, ...inputs.tlsSan],
+            installFlags: clusterFlags,
+            nodeLabels,
+            nodeTaints: config.servers.taints,
+          }),
+        );
+      const instance = new aws.ec2.Instance(
+        $`server-${index + 1}`,
+        {
+          ami: resolveAmi(config.servers.architecture, config.servers.amiId).id,
+          instanceType: config.servers.instanceType,
+          subnetId: validatedPrivateSubnetIds.apply(
+            (ids) => ids[index % ids.length],
+          ),
+          associatePublicIpAddress: false,
+          iamInstanceProfile: index === 0
+            ? bootstrapServerIdentity.profile.name
+            : serverIdentity.profile.name,
+          vpcSecurityGroupIds: [serverSg.id],
+          sourceDestCheck: false,
+          userData,
+          rootBlockDevice: {
+            encrypted: true,
+            volumeSize: config.servers.rootVolumeSizeGb,
+            volumeType: config.servers.rootVolumeType,
+            tags: resourceTags($`${nodeName}-root`),
+          },
+          metadataOptions: {
+            httpEndpoint: "enabled",
+            httpTokens: "required",
+            httpPutResponseHopLimit: 1,
+            instanceMetadataTags: "disabled",
+          },
+          tags: {
+            ...resourceTags($`${nodeName}`),
+            "sdlc.works/k3s-role": "server",
+          },
+        },
+        {
+          ...awsOpts,
+          dependsOn: [
+            clusterTokenVersion,
+            ...(index === 0
+              ? [bootstrapServerIdentity.inlinePolicy, bootstrapServerIdentity.ssmPolicy]
+              : [serverIdentity.inlinePolicy, serverIdentity.ssmPolicy]),
+            controlListener,
+          ],
+          ignoreChanges: ["ami", "userData"],
+        },
+      );
+      serverInstances.push(instance);
+      controlAttachments.push(new aws.lb.TargetGroupAttachment(
+        $`control-attachment-${index + 1}`,
+        {
+          targetGroupArn: controlTargetGroup.arn,
+          targetId: instance.id,
+          port: 6443,
+        },
+        awsOpts,
+      ));
+      workloadTargetGroups.forEach((targetGroup, targetIndex) => {
+        new aws.lb.TargetGroupAttachment(
+          $`workload-attachment-${index + 1}-${targetIndex + 1}`,
+          {
+            targetGroupArn: targetGroup.arn,
+            targetId: instance.id,
+            port: targetIndex === 0 ? 80 : 443,
+          },
+          awsOpts,
+        );
+      });
+      serverNodeOutputs.push(
+        pulumi
+          .all([
+            instance.id,
+            instance.arn,
+            instance.availabilityZone,
+            instance.privateIp,
+          ])
+          .apply(([instanceId, arn, zone, internalIp]) => ({
+            name: nodeName,
+            instanceId,
+            arn,
+            zone,
+            internalIp,
+          })),
+      );
+    }
+
+    const agentPoolOutputs: Record<
+      string,
+      {
+        autoScalingGroupName: pulumi.Output<string>;
+        launchTemplateId: pulumi.Output<string>;
+        minSize: number;
+        desiredSize: number;
+        maxSize: number;
+      }
+    > = {};
+    for (const [poolName, pool] of Object.entries(config.agentPools)) {
+      const groupName = $`agent-${poolName}`;
+      const launchHookName = $`agent-${poolName}-ready`;
+      const poolLabels = [
+        `sdlc.works/machine-group=${poolName}`,
+        "sdlc.works/k3s-role=agent",
+        ...Object.entries(pool.labels).map(([key, value]) => `${key}=${value}`),
+      ];
+      const userData = pulumi
+        .all([
+          controlLb.dnsName,
+          clusterTokenSecret.arn,
+          kubeconfigSecret.arn,
+          bootstrapMarkerSecret.arn,
+        ])
+        .apply(([controlHost, clusterTokenSecretArn, kubeconfigSecretArn, bootstrapMarkerSecretArn]) =>
+          Buffer.from(
+            buildAwsK3sCloudInit({
+              nodeRole: "agent",
+              isHa: config.servers.count > 1,
+              version: inputs.k3sVersion,
+              channel: inputs.k3sChannel,
+              clusterTokenSecretArn,
+              kubeconfigSecretArn,
+              bootstrapMarkerSecretArn,
+              expectedServerCount: config.servers.count,
+              region: credentials.AWS_REGION,
+              joinUrl: `https://${controlHost}:6443`,
+              tlsSans: [],
+              installFlags: inputs.k3sInstallFlags,
+              nodeLabels: poolLabels,
+              nodeTaints: pool.taints,
+              autoScalingGroupName: groupName,
+              launchLifecycleHookName: launchHookName,
+            }),
+          ).toString("base64"),
+        );
+      const launchTemplate = new aws.ec2.LaunchTemplate(
+        $`agent-${poolName}-template`,
+        {
+          imageId: resolveAmi(pool.architecture, pool.amiId).id,
+          instanceType: pool.instanceType,
+          iamInstanceProfile: { arn: agentIdentity.profile.arn },
+          networkInterfaces: [{
+            deviceIndex: 0,
+            associatePublicIpAddress: "false",
+            deleteOnTermination: "true",
+            securityGroups: [agentSg.id],
+          }],
+          userData,
+          metadataOptions: {
+            httpEndpoint: "enabled",
+            httpTokens: "required",
+            httpPutResponseHopLimit: 1,
+            instanceMetadataTags: "disabled",
+          },
+          instanceMarketOptions:
+            pool.capacityType === "spot"
+              ? {
+                  marketType: "spot",
+                  spotOptions: { instanceInterruptionBehavior: "terminate" },
+                }
+              : undefined,
+          blockDeviceMappings: [
+            {
+              deviceName: resolveAmi(pool.architecture, pool.amiId).rootDeviceName,
+              ebs: {
+                deleteOnTermination: "true",
+                encrypted: "true",
+                volumeSize: pool.rootVolumeSizeGb,
+                volumeType: pool.rootVolumeType,
+              },
+            },
+          ],
+          tagSpecifications: [
+            {
+              resourceType: "instance",
+              tags: {
+                ...resourceTags($`agent-${poolName}`),
+                "sdlc.works/k3s-role": "agent",
+                "sdlc.works/machine-group": poolName,
+              },
+            },
+            {
+              resourceType: "volume",
+              tags: resourceTags($`agent-${poolName}-root`),
+            },
+          ],
+          tags: resourceTags($`agent-${poolName}-template`),
+        },
+        {
+          ...awsOpts,
+          dependsOn: [
+            clusterTokenVersion,
+            agentIdentity.inlinePolicy,
+            agentIdentity.ssmPolicy,
+            controlListener,
+          ],
+        },
+      );
+      const group = new aws.autoscaling.Group(
+        $`agent-${poolName}`,
+        {
+          name: groupName,
+          minSize: pool.minSize,
+          desiredCapacity: pool.desiredSize,
+          maxSize: pool.maxSize,
+          vpcZoneIdentifiers: pool.subnetIds ?? validatedPrivateSubnetIds,
+          healthCheckType: workloadTargetGroups.length > 0 ? "ELB" : "EC2",
+          healthCheckGracePeriod: 600,
+          capacityRebalance: pool.capacityType === "spot",
+          targetGroupArns: workloadTargetGroups.map((targetGroup) => targetGroup.arn),
+          initialLifecycleHooks: [{
+            name: launchHookName,
+            lifecycleTransition: "autoscaling:EC2_INSTANCE_LAUNCHING",
+            heartbeatTimeout: 900,
+            defaultResult: "ABANDON",
+          }],
+          launchTemplate: {
+            id: launchTemplate.id,
+            version: launchTemplate.latestVersion.apply(String),
+          },
+          instanceRefresh: {
+            strategy: "Rolling",
+            preferences: {
+              minHealthyPercentage: 100,
+              maxHealthyPercentage: 150,
+              instanceWarmup: "300",
+              skipMatching: true,
+            },
+          },
+          tags: [
+            {
+              key: "Name",
+              value: $`agent-${poolName}`,
+              propagateAtLaunch: true,
+            },
+            {
+              key: "sdlc.works/machine-group",
+              value: poolName,
+              propagateAtLaunch: true,
+            },
+          ],
+        },
+        {
+          ...awsOpts,
+          protect: pool.desiredSize > 0,
+        },
+      );
+      const lifecycleHook = new aws.autoscaling.LifecycleHook(
+        $`agent-${poolName}-drain`,
+        {
+          autoscalingGroupName: group.name,
+          lifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING",
+          heartbeatTimeout: 900,
+          defaultResult: "ABANDON",
+        },
+        awsOpts,
+      );
+      if (pool.targetCpuUtilization !== undefined) {
+        new aws.autoscaling.Policy(
+          $`agent-${poolName}-cpu-scaling`,
+          {
+            autoscalingGroupName: group.name,
+            policyType: "TargetTrackingScaling",
+            estimatedInstanceWarmup: 300,
+            targetTrackingConfiguration: {
+              targetValue: pool.targetCpuUtilization,
+              predefinedMetricSpecification: {
+                predefinedMetricType: "ASGAverageCPUUtilization",
+              },
+            },
+          },
+          awsOpts,
+        );
+      }
+      const drainRule = new aws.cloudwatch.EventRule(
+        $`agent-${poolName}-termination`,
+        {
+          description: `Drain k3s agent pool ${poolName} before termination`,
+          eventPattern: group.name.apply((groupName) =>
+            JSON.stringify({
+              source: ["aws.autoscaling"],
+              "detail-type": ["EC2 Instance-terminate Lifecycle Action"],
+              detail: { AutoScalingGroupName: [groupName] },
+            }),
+          ),
+          tags: resourceTags($`agent-${poolName}-termination`),
+        },
+        awsOpts,
+      );
+      const drainPermission = new aws.lambda.Permission(
+        $`agent-${poolName}-drain-permission`,
+        {
+          action: "lambda:InvokeFunction",
+          function: drainFunction.name,
+          principal: "events.amazonaws.com",
+          sourceArn: drainRule.arn,
+        },
+        awsOpts,
+      );
+      new aws.cloudwatch.EventTarget(
+        $`agent-${poolName}-drain-target`,
+        {
+          rule: drainRule.name,
+          arn: drainFunction.arn,
+        },
+        {
+          ...awsOpts,
+          dependsOn: [drainPermission, lifecycleHook],
+        },
+      );
+      agentPoolOutputs[poolName] = {
+        autoScalingGroupName: group.name,
+        launchTemplateId: launchTemplate.id,
+        minSize: pool.minSize,
+        desiredSize: pool.desiredSize,
+        maxSize: pool.maxSize,
+      };
+    }
+
+    const kubeconfig = new SecretValueWaiter(
+      $`wait-for-kubeconfig`,
+      {
+        secretId: kubeconfigSecret.arn,
+        region: credentials.AWS_REGION,
+        accessKeyId: credentials.AWS_ACCESS_KEY_ID,
+        secretAccessKey: credentials.AWS_SECRET_ACCESS_KEY,
+        sessionToken: credentials.AWS_SESSION_TOKEN,
+        expectedPublisherInstanceId: serverInstances[0].id,
+      },
+      {
+        dependsOn: [serverInstances[0], controlListener, ...controlAttachments],
+      },
+    );
+
+    state.kubeconfig = kubeconfig.value;
+    state.apiServerUrl = apiServerUrl;
+    state.cloudProvider = "aws";
+    state.ecrRepositoryArns = config.ecrRepositoryArns;
+    state.agentPoolDesiredSizes = Object.fromEntries(
+      Object.entries(config.agentPools).map(([name, pool]) => [
+        name,
+        pool.desiredSize,
+      ]),
+    );
+    state.publicEndpointHost = workloadLb?.dnsName;
+    state.sshKeys = {};
+    state.nodeIps = Object.fromEntries(
+      serverNodeOutputs.map((entry, index) => [
+        `server-${index + 1}`,
+        {
+          internalIp: entry.apply((value) => value.internalIp),
+          externalIp: undefined,
+        },
+      ]),
+    ) as any;
+    state.defaultResourceLimits = inputs.defaultResourceLimits as any;
+    state.defaultResourceRequests = inputs.defaultResourceRequests as any;
+    state.defaultNamespaceQuota = inputs.defaultNamespaceQuota as any;
+    (state as any).postgresClusterConfig = inputs.postgresClusterConfig;
+
+    const defaultK8sProvider = new k8s.Provider($`k8s-default`, {
+      kubeconfig: kubeconfig.value,
+      enableServerSideApply: false,
+    });
+    const defaultNamespace = new k8s.core.v1.Namespace(
+      $`ns-components`,
+      { metadata: { name: "components" } },
+      { provider: defaultK8sProvider },
+    );
+    (state as any).defaultK8sProvider = defaultK8sProvider;
+    (state as any).defaultNamespace = defaultNamespace;
+
+    if (inputs.monitoring.enabled && inputs.monitoring.mode === "self-hosted") {
+      new k8s.helm.v3.Release(
+        $`monitoring`,
+        {
+          chart: "kube-prometheus-stack",
+          name: "monitoring",
+          namespace: "monitoring",
+          createNamespace: true,
+          timeout: 600,
+          repositoryOpts: {
+            repo: "https://prometheus-community.github.io/helm-charts",
+          },
+          values: {
+            grafana: {
+              adminPassword: inputs.monitoring.grafanaAdminPassword,
+              service: {
+                type: "NodePort",
+                nodePort: inputs.monitoring.grafanaNodePort,
+              },
+            },
+            prometheus: {
+              prometheusSpec: {
+                retention: `${inputs.monitoring.retentionDays}d`,
+              },
+            },
+            alertmanager: { enabled: false },
+          },
+        },
+        { provider: defaultK8sProvider },
+      );
+    }
+    const nodesOutput = pulumi.all(serverNodeOutputs).apply((nodes) =>
+      Object.fromEntries(
+        nodes.map((node) => [
+          node.name,
+          {
+            instanceId: node.instanceId,
+            instanceSelfLink: node.arn,
+            instanceName: node.name,
+            zone: node.zone,
+            internalIp: node.internalIp,
+            externalIp: undefined,
+          },
+        ]),
+      ),
+    );
+
+    return {
+      apiServerUrl,
+      nodes: nodesOutput,
+      agentPools: agentPoolOutputs,
+      publicEndpointHost: workloadLb?.dnsName,
+      cloudProvider: "aws" as const,
+      region: credentials.AWS_REGION,
+    };
+  },
+
+  allocateWithPulumiCtx: sharedK3sLifecycle.allocateWithPulumiCtx as any,
+  upsertArtifacts: sharedK3sLifecycle.upsertArtifacts as any,
+  connect: sharedK3sLifecycle.connect as any,
+}) as any);
 
 export default component;
 

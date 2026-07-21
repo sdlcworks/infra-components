@@ -25,6 +25,7 @@ export type RawMetadata = {
   protocol?: pulumi.Input<PublicMetadata["protocol"] | undefined>;
   mode?: pulumi.Input<PublicMetadata["mode"] | undefined>;
   originAddressed?: pulumi.Input<boolean | undefined>;
+  requiredHost?: pulumi.Input<string | undefined>;
   [k: string]: unknown;
 };
 

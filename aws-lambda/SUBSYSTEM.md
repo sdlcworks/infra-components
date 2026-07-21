@@ -48,9 +48,10 @@ outputs:
     description: >
       App-facing public invocation endpoint, emitted only where exposure was
       explicitly chosen. The endpoint is origin-addressed: it serves only
-      requests addressed by its own provider-assigned name, and it declares
-      that addressing constraint so downstream publishers know pure name
-      aliasing is insufficient and a re-addressing hop is required.
+      requests addressed by its own provider-assigned name and does not declare
+      a separate required public host. A downstream publisher that binds another
+      name must retain the managed re-addressing hop to the origin rather than
+      treating the endpoint as exact-public-name-only or as a pure alias.
   - name: function-fleet-identity
     description: >
       Environment-visible identities and endpoints of the provisioned functions.
