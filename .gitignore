@@ -9,6 +9,12 @@
 .js/infra-bundle.tar.gz
 .js/metadata.json
 
+# Local dev-only tarball of the qa-branch open-label @sdlcworks/components
+# grammar, referenced by a file: dependency for local-macos exemplar
+# validation. Not a durable dependency source — see local-macos/SUBSYSTEM.md
+# callers' follow-up note.
+.js/.local-tarballs/
+
 .env*
 
 tmp*
