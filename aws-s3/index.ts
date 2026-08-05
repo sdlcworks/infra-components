@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
 } from "@sdlcworks/components";
@@ -98,7 +97,7 @@ const component = new InfraComponent({
   }),
 });
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     bucketName: z.string(),
     arn: z.string(),

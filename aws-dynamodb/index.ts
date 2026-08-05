@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
 } from "@sdlcworks/components";
@@ -265,7 +264,7 @@ function localSecondaryIndexes(table: TableConfig): aws.types.input.dynamodb.Tab
   }));
 }
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     region: z.string().optional(),
     tableFingerprints: z.record(z.string(), z.string()).default({}),

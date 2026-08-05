@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { CloudProvider, InfraComponent } from "@sdlcworks/components";
+import { InfraComponent } from "@sdlcworks/components";
 
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
@@ -323,7 +323,7 @@ const component = new InfraComponent({
   }),
 });
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   pulumi: async ({ $, inputs, aws: provider }) => {
     const awsOpts: pulumi.CustomResourceOptions = provider
       ? { provider }

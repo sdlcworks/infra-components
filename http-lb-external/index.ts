@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { CloudProvider, InfraComponent } from "@sdlcworks/components";
+import { InfraComponent } from "@sdlcworks/components";
 
 import * as gcp from "@pulumi/gcp";
 
@@ -96,7 +96,7 @@ const component = new InfraComponent({
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   pulumi: async ({ $, inputs, gcp: gcpProvider }) => {
     const gcpOpts: import("@pulumi/pulumi").CustomResourceOptions = gcpProvider
       ? { provider: gcpProvider }

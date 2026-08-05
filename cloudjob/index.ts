@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
@@ -95,7 +94,7 @@ const component = new InfraComponent({
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     jobName: z.string(),
     location: z.string(),

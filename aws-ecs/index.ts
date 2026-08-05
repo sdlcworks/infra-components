@@ -18,7 +18,6 @@ import {
 } from "@aws-sdk/client-ecr";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import {
-  CloudProvider,
   DeploymentArtifactType,
   InfraComponent,
   connectionHandler,
@@ -1182,7 +1181,7 @@ function externalRequestMetricResourceLabel(
     });
 }
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     accountId: z.string().optional(),
     region: z.string().optional(),

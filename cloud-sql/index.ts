@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
 } from "@sdlcworks/components";
@@ -69,7 +68,7 @@ const component = new InfraComponent({
   outputSchema: z.object({}),
 });
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     sqlInstances: z.record(z.string(), SqlInstanceStateSchema).default({}),
     allocations: z.record(z.string(), AllocationSchema).default({}),

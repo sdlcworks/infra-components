@@ -2,7 +2,6 @@ import { z } from "zod";
 import { createHash } from "crypto";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
 } from "@sdlcworks/components";
@@ -147,7 +146,7 @@ const component = new InfraComponent({
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     bucketName: z.string(),
     allocations: z.record(z.string(), z.object({
@@ -268,7 +267,7 @@ component.implement(CloudProvider.gcloud, {
 
 // ---- Cloudflare Provider Implementation ----
 
-component.implement(CloudProvider.cloudflare, {
+component.implement("cloudflare", {
   stateSchema: z.object({
     // Instance-level — set in pulumi(), shared by all bucket targets.
     r2AccessKeyId: z.string().optional(),
@@ -590,7 +589,7 @@ function awsLifecycleRulesRequireVersioningCapability(
   );
 }
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     config: z.object({
       versioning: z.boolean().default(false),

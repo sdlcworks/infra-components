@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
@@ -787,7 +786,7 @@ const component = new InfraComponent({
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     // Full kubeconfig YAML string retrieved from the init server after boot.
     // Used by allocateWithPulumiCtx and upsertArtifacts to talk to the k8s API.
@@ -2779,9 +2778,9 @@ function requireAwsCredentials(value: CloudCredentialAWS): AwsCredentials {
   return credentials;
 }
 
-const sharedK3sLifecycle = component.providers[CloudProvider.gcloud]!;
+const sharedK3sLifecycle = component.providers["gcloud"]!;
 
-component.implement(CloudProvider.aws, ({
+component.implement("aws", ({
   stateSchema: z.object({
     kubeconfig: z.string(),
     apiServerUrl: z.string(),

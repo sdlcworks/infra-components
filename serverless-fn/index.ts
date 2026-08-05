@@ -3,7 +3,6 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
   DeploymentArtifactType,
@@ -304,7 +303,7 @@ const component = new InfraComponent({
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     serviceName: z.string(),
     region: z.string(),
@@ -815,7 +814,7 @@ component.implement(CloudProvider.gcloud, {
 
 // ---- Cloudflare Provider Implementation ----
 
-component.implement(CloudProvider.cloudflare, {
+component.implement("cloudflare", {
   stateSchema: z.object({
     scriptName: z.string(),
     accountId: z.string(),

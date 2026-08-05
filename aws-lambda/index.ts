@@ -18,7 +18,6 @@ import {
 } from "@aws-sdk/client-lambda";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import {
-  CloudProvider,
   DeploymentArtifactType,
   InfraComponent,
   connectionHandler,
@@ -563,7 +562,7 @@ async function waitForLambdaUpdate(
   );
 }
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     accountId: z.string().optional(),
     region: z.string().optional(),

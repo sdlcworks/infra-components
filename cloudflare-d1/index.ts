@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
 } from "@sdlcworks/components";
@@ -56,7 +55,7 @@ const component = new InfraComponent({
 
 // ---- Cloudflare Provider Implementation ----
 
-component.implement(CloudProvider.cloudflare, {
+component.implement("cloudflare", {
   stateSchema: z.object({
     databaseName: z.string(),
     databaseId: z.string(),

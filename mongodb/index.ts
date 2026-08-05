@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
   type CloudCredentialMongoDBAtlas,
@@ -31,9 +30,7 @@ const DEFAULT_USER_NAME = "app-user";
 const MAX_CLUSTER_NAME_LENGTH = 64;
 const MAX_USERNAME_LENGTH = 63;
 const MONGODB_SRV_SCHEME = "mongodb+srv://";
-const MONGODB_ATLAS_PROVIDER = (
-  CloudProvider.mongodbatlas ?? "mongodbatlas"
-) as CloudProvider;
+const MONGODB_ATLAS_PROVIDER = "mongodbatlas";
 const CONFIG_SNAPSHOT_MISSING_ERROR =
   "mongodb: config snapshot missing from state; pulumi() must run before allocateWithPulumiCtx.";
 const REPLACEMENT_FINGERPRINT_ERROR =

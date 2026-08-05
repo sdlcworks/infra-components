@@ -22,7 +22,6 @@
 import { z } from "zod";
 
 import {
-  CloudProvider,
   InfraComponent,
   connectionHandler,
   defaultAppComponentType,
@@ -663,7 +662,7 @@ const component = new InfraComponent({
 
 // ---- Hetzner Provider Implementation ----
 
-component.implement(CloudProvider.hetzner, {
+component.implement("hetzner", {
   stateSchema: z.object({
     ipv4Address: z.string().optional(),
     ipv6Address: z.string().optional(),
@@ -857,7 +856,7 @@ component.implement(CloudProvider.hetzner, {
 
 // ---- GCloud Provider Implementation ----
 
-component.implement(CloudProvider.gcloud, {
+component.implement("gcloud", {
   stateSchema: z.object({
     ipv4Address: z.string().optional(),
     internalIpAddress: z.string().optional(),
@@ -1113,7 +1112,7 @@ component.implement(CloudProvider.gcloud, {
 
 // ---- AWS Provider Implementation ----
 
-component.implement(CloudProvider.aws, {
+component.implement("aws", {
   stateSchema: z.object({
     ipv4Address: z.string().optional(),
   }),
