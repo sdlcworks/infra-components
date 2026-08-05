@@ -208,7 +208,7 @@ component.implement(LOCAL_WORLD_LABEL, {
       // Named absence, not a fault: at first convergence the loop has not yet
       // built anything — the workload materializes when the first admitted
       // artifact arrives through release, which re-enacts this allocation.
-      console.log(
+      console.error(
         `${LOCAL_WORLD_LABEL}: component "${name}" awaits its first admitted build artifact; allocation deferred`,
       );
       return;
