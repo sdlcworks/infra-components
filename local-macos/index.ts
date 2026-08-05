@@ -264,7 +264,7 @@ component.implement(LOCAL_WORLD_LABEL, {
     ];
 
     new k8s.apps.v1.Deployment(
-      $`deployment`,
+      $(`deployment-${name}`),
       {
         metadata: { namespace, name },
         spec: {
@@ -289,7 +289,7 @@ component.implement(LOCAL_WORLD_LABEL, {
     );
     }
     new k8s.core.v1.Service(
-      $`service`,
+      $(`service-${name}`),
       {
         metadata: { namespace, name },
         spec: {
@@ -302,7 +302,7 @@ component.implement(LOCAL_WORLD_LABEL, {
 
     if (appComponentType === "http-service" && config.publicHost) {
       new k8s.networking.v1.Ingress(
-        $`ingress`,
+        $(`ingress-${name}`),
         {
           metadata: { namespace, name },
           spec: {
