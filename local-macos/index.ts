@@ -97,6 +97,19 @@ const StateSchema = z.object({
   registryPushAddress: z.string(),
   registryClusterAddress: z.string(),
   namespace: z.string(),
+  allocations: z
+    .record(
+      z.string(),
+      z.object({
+        appComponentType: z.string(),
+        namespace: z.string(),
+        port: z.number(),
+        replicas: z.number(),
+        env: z.record(z.string(), z.string()),
+        publicHost: z.string().optional(),
+      }),
+    )
+    .default({}),
 });
 
 function providerFrom(kubeconfig: pulumi.Input<string>, name: string) {
@@ -204,15 +217,39 @@ component.implement(LOCAL_WORLD_LABEL, {
     }
 
     const config = ServiceDeployConfigSchema.parse(deploymentConfig);
+
+    // The workload's artifact-independent shape — addressability and its
+    // recorded allocation — always converges; the running Deployment
+    // materializes only from an admitted artifact, here when one is already
+    // released, otherwise at the release act through upsertArtifacts.
+    const allocations = (state.allocations ?? {}) as Record<
+      string,
+      {
+        appComponentType: string;
+        namespace: string;
+        port: number;
+        replicas: number;
+        env: Record<string, string>;
+        publicHost?: string;
+      }
+    >;
+    allocations[name] = {
+      appComponentType,
+      namespace,
+      port: config.port,
+      replicas: config.replicas,
+      env: config.env,
+      publicHost: config.publicHost,
+    };
+    state.allocations = allocations;
+
     if (!buildArtifact) {
-      // Named absence, not a fault: at first convergence the loop has not yet
-      // built anything — the workload materializes when the first admitted
-      // artifact arrives through release, which re-enacts this allocation.
       console.error(
-        `${LOCAL_WORLD_LABEL}: component "${name}" awaits its first admitted build artifact; allocation deferred`,
+        `${LOCAL_WORLD_LABEL}: component "${name}" awaits its first admitted build artifact; the workload materializes at release`,
       );
-      return;
     }
+
+    if (buildArtifact) {
     const image = toClusterImageRef(
       buildArtifact.artifact.uri,
       state.registryPushAddress as string,
@@ -250,6 +287,7 @@ component.implement(LOCAL_WORLD_LABEL, {
       },
       { provider },
     );
+    }
     new k8s.core.v1.Service(
       $`service`,
       {
@@ -343,8 +381,20 @@ component.implement(LOCAL_WORLD_LABEL, {
     ] as const;
   },
 
-  upsertArtifacts: async ({ buildArtifacts, state }) => {
+  upsertArtifacts: async ({ buildArtifacts, state, envStore }) => {
     const pushAddress = state.registryPushAddress as string;
+    const clusterAddress = state.registryClusterAddress as string;
+    const allocations = (state.allocations ?? {}) as Record<
+      string,
+      {
+        appComponentType: string;
+        namespace: string;
+        port: number;
+        replicas: number;
+        env: Record<string, string>;
+        publicHost?: string;
+      }
+    >;
     for (const [componentName, info] of Object.entries(buildArtifacts)) {
       if (info.artifact.type !== DeploymentArtifactType.oci_spec_image) {
         throw new Error(
@@ -356,8 +406,136 @@ component.implement(LOCAL_WORLD_LABEL, {
           `${LOCAL_WORLD_LABEL}: artifact "${info.artifact.uri}" for "${componentName}" is not resolvable through the branch's bound artifact store at ${pushAddress}; bind the branch's image artifact store to the machine-reachable registry`,
         );
       }
+      const allocation = allocations[componentName];
+      if (!allocation) {
+        console.error(
+          `${LOCAL_WORLD_LABEL}: component "${componentName}" has no recorded allocation on this substrate; converge the branch before releasing onto it`,
+        );
+        continue;
+      }
+      const image = toClusterImageRef(info.artifact.uri, pushAddress, clusterAddress);
+      const env = [
+        ...Object.entries(
+          ((envStore ?? {}) as Record<string, Record<string, string>>)[
+            componentName
+          ] ?? {},
+        ).map(([k, v]) => ({ name: k, value: v })),
+        ...Object.entries(allocation.env).map(([k, v]) => ({
+          name: k,
+          value: v,
+        })),
+      ];
+      console.error(
+        `${LOCAL_WORLD_LABEL}: materializing ${image} → deployment/${componentName} in "${allocation.namespace}"`,
+      );
+      await applyDeployment(state.kubeconfig as string, {
+        name: componentName,
+        namespace: allocation.namespace,
+        image,
+        port: allocation.port,
+        replicas: allocation.replicas,
+        env,
+      });
     }
   },
 });
+
+type KubeconfigShape = {
+  clusters: Array<{
+    cluster: { server: string; "certificate-authority-data": string };
+  }>;
+  users: Array<{
+    user: { "client-certificate-data": string; "client-key-data": string };
+  }>;
+};
+
+// Server-side apply: one idempotent act that creates the workload when absent
+// and converges it when standing — the release enacts materialization exactly
+// as the contract's admitted-materials invariant demands.
+async function applyDeployment(
+  kubeconfigYaml: string,
+  spec: {
+    name: string;
+    namespace: string;
+    image: string;
+    port: number;
+    replicas: number;
+    env: Array<{ name: string; value: string }>;
+  },
+): Promise<void> {
+  const { load } = await import("js-yaml");
+  const { request } = await import("node:https");
+  const kubeconfig = load(kubeconfigYaml) as KubeconfigShape;
+  const cluster = kubeconfig.clusters[0]?.cluster;
+  const user = kubeconfig.users[0]?.user;
+  if (!cluster || !user) {
+    throw new Error(
+      `${LOCAL_WORLD_LABEL}: substrate kubeconfig carries no cluster or user identity`,
+    );
+  }
+  const body = JSON.stringify({
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: {
+      name: spec.name,
+      namespace: spec.namespace,
+      labels: { app: spec.name },
+    },
+    spec: {
+      replicas: spec.replicas,
+      selector: { matchLabels: { app: spec.name } },
+      template: {
+        metadata: { labels: { app: spec.name } },
+        spec: {
+          containers: [
+            {
+              name: spec.name,
+              image: spec.image,
+              ports: [{ containerPort: spec.port }],
+              env: spec.env,
+            },
+          ],
+        },
+      },
+    },
+  });
+  const url = new URL(
+    `${cluster.server}/apis/apps/v1/namespaces/${spec.namespace}/deployments/${spec.name}?fieldManager=sdlc-local-release&force=true`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    const req = request(
+      {
+        host: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/apply-patch+yaml",
+          "Content-Length": Buffer.byteLength(body),
+        },
+        ca: Buffer.from(cluster["certificate-authority-data"], "base64"),
+        cert: Buffer.from(user["client-certificate-data"], "base64"),
+        key: Buffer.from(user["client-key-data"], "base64"),
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          if ((res.statusCode ?? 500) < 300) {
+            resolve();
+          } else {
+            reject(
+              new Error(
+                `${LOCAL_WORLD_LABEL}: apply of deployment/${spec.name} refused: ${res.statusCode} ${data}`,
+              ),
+            );
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 
 export default component;
