@@ -140,7 +140,7 @@ component.implement(LOCAL_WORLD_LABEL, {
   }) => {
     const provider = providerFrom(
       pulumi.output(state.kubeconfig),
-      $`k8s-provider`,
+      $(`k8s-provider-${name}`),
     );
     const namespace = state.namespace as string;
 
@@ -205,9 +205,13 @@ component.implement(LOCAL_WORLD_LABEL, {
 
     const config = ServiceDeployConfigSchema.parse(deploymentConfig);
     if (!buildArtifact) {
-      throw new Error(
-        `${LOCAL_WORLD_LABEL}: component "${name}" has no admitted build artifact; workloads materialize only from admitted materials`,
+      // Named absence, not a fault: at first convergence the loop has not yet
+      // built anything — the workload materializes when the first admitted
+      // artifact arrives through release, which re-enacts this allocation.
+      console.log(
+        `${LOCAL_WORLD_LABEL}: component "${name}" awaits its first admitted build artifact; allocation deferred`,
       );
+      return;
     }
     const image = toClusterImageRef(
       buildArtifact.artifact.uri,
