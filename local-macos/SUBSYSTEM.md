@@ -22,10 +22,16 @@ definition: >
   Substrate as converged interior. The machine-resident kubernetes
   substrate — including whatever container-capable layer this operating
   system requires — is acquired and converged idempotently inside the
-  realization: present when convergence needs it, a safe no-op when it
-  already stands. No contract names the tooling; substrate choice is
-  the author's private concern and may change without any contract
-  moving.
+  realization. Standing means demonstrated readiness to host, never
+  mere membership in a runtime's inventory: absent, the substrate is
+  created; ready, convergence is a safe no-op; present in inventory
+  yet unable to answer, it is revived by non-destructive acts alone,
+  since its state is shared tenancy. Only when no non-destructive act
+  restores readiness does convergence refuse, as a named condition
+  directing the author to the deliberate substrate act that lies
+  outside any branch's lifecycle. No contract names the tooling;
+  substrate choice is the author's private concern and may change
+  without any contract moving.
 
   Shared substrate, tenancy-scoped blast radius. One substrate serves
   every branch realized on this machine. Each branch's workloads live

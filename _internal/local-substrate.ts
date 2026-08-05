@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 
 export const LOCAL_WORLD_LABEL = "local-macos";
 export const SUBSTRATE_CLUSTER_NAME = "sdlc-local";
@@ -108,13 +110,81 @@ function readKubeconfig(): { kubeconfig: string; apiServerUrl: string } {
   return { kubeconfig, apiServerUrl: serverLine.trim().slice("server:".length).trim() };
 }
 
+const READINESS_DEADLINE_MS = 60_000;
+const READINESS_POLL_INTERVAL_MS = 2_000;
+const READINESS_PROBE_TIMEOUT_MS = 3_000;
+
+function probeUrl(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = transport(
+      {
+        host: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname,
+        timeout: READINESS_PROBE_TIMEOUT_MS,
+        // Substrate identity is machine possession; the API server's cert is
+        // self-signed and readiness only demands an answer, not a verdict.
+        rejectUnauthorized: false,
+      },
+      (res) => {
+        res.resume();
+        resolve((res.statusCode ?? 500) < 500);
+      },
+    );
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
+async function substrateReady(apiServerUrl: string): Promise<boolean> {
+  const apiAnswers = await probeUrl(`${apiServerUrl}/readyz`);
+  if (!apiAnswers) return false;
+  return probeUrl(`http://${REGISTRY_PUSH_ADDRESS}/v2/`);
+}
+
+function reviveSubstrate(): void {
+  tryRun("k3d", ["cluster", "start", SUBSTRATE_CLUSTER_NAME]);
+  const registries = tryRun("k3d", ["registry", "list", "-o", "json"]);
+  if (registries !== undefined) {
+    const match = (JSON.parse(registries) as Array<{ name: string }>).find(
+      (r) => r.name.includes(SUBSTRATE_REGISTRY_NAME),
+    );
+    if (match) tryRun("docker", ["start", match.name]);
+  }
+}
+
+async function awaitReadiness(apiServerUrl: string): Promise<boolean> {
+  const deadline = Date.now() + READINESS_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    if (await substrateReady(apiServerUrl)) return true;
+    await new Promise((resolve) =>
+      setTimeout(resolve, READINESS_POLL_INTERVAL_MS),
+    );
+  }
+  return false;
+}
+
 // Idempotent by construction: every step is check-then-act, and nothing here is
 // a tracked deployment resource — teardown of any branch can never reach the
-// substrate through this module.
+// substrate through this module. Standing means demonstrated readiness to
+// host, never inventory membership: an inventoried-but-unanswering substrate
+// is revived by non-destructive acts alone, and only their failure refuses.
 export async function ensureSubstrate(): Promise<SubstrateHandle> {
   ensureDockerDaemon();
   ensureCluster();
-  const { kubeconfig, apiServerUrl } = readKubeconfig();
+  let { kubeconfig, apiServerUrl } = readKubeconfig();
+  if (!(await substrateReady(apiServerUrl))) {
+    reviveSubstrate();
+    ({ kubeconfig, apiServerUrl } = readKubeconfig());
+    if (!(await awaitReadiness(apiServerUrl))) {
+      throw new Error(
+        `${LOCAL_WORLD_LABEL}: substrate ${SUBSTRATE_CLUSTER_NAME} stands in the runtime inventory but did not answer after non-destructive revival; restoring or destroying the substrate is a deliberate act outside any branch's lifecycle`,
+      );
+    }
+  }
   return {
     kubeconfig,
     apiServerUrl,
