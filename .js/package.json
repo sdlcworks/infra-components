@@ -24,7 +24,7 @@
     "@aws-sdk/client-lambda": "^3.978.0",
     "@aws-sdk/client-secrets-manager": "^3.1081.0",
     "@aws-sdk/client-sts": "^3.978.0",
-    "@sdlcworks/components": "0.0.64",
+    "@sdlcworks/components": "file:.local-tarballs/sdlcworks-components-0.0.66.tgz",
     "js-yaml": "^4.1.1",
     "zod": "4.1.13"
   }

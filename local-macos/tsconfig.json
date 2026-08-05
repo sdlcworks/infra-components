@@ -1,0 +1,16 @@
+{
+  "extends": "../.js/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "types": ["bun"]
+  },
+  "include": [
+    "./index.ts",
+    "../_internal/interfaces.ts",
+    "../_internal/local-substrate.ts",
+    "../url-registers/local-ingress/index.ts",
+    "../artifact-registries/local-registry/index.ts",
+    "../_tests/local-macos/*.ts"
+  ]
+}

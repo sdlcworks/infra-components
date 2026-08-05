@@ -304,3 +304,40 @@ export const K3sInternalCI = defineConnectionInterface(
     dbPassword: z.string().optional(),
   })
 );
+
+// ---- Local macOS (machine-local-workload-host exemplar) ----
+//
+// Distinctly named from the generic Public/InternalService/Postgres CIs so
+// the local-macos exemplar's machine-local reach never gets silently
+// aliased onto a cloud-realized peer's wiring.
+
+export const LocalPublicHttpCI = defineConnectionInterface(
+  "local-public-http",
+  z.object({}),
+  z.object({
+    serviceName: z.string(),
+    namespace: z.string(),
+    port: z.number(),
+  }),
+);
+
+export const LocalInternalServiceCI = defineConnectionInterface(
+  "local-internal-service",
+  z.object({}),
+  z.object({
+    host: z.string(),
+    port: z.number(),
+  }),
+);
+
+export const LocalPostgresCI = defineConnectionInterface(
+  "local-postgres",
+  z.object({}),
+  z.object({
+    host: z.string(),
+    port: z.number(),
+    database: z.string(),
+    username: z.string(),
+    password: z.string(),
+  }),
+);
