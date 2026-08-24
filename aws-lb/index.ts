@@ -481,6 +481,7 @@ component.implement("aws", {
     }
 
     const listenerResources: Record<string, aws.lb.Listener> = {};
+    const attachmentResources: pulumi.Resource[] = [];
     for (let index = 0; index < listeners.length; index += 1) {
       const listener = listeners[index];
       const listenerName = `listener-${index}`;
@@ -504,7 +505,7 @@ component.implement("aws", {
 
       for (let ruleIndex = 0; ruleIndex < listener.rules.length; ruleIndex += 1) {
         const rule = listener.rules[ruleIndex];
-        new aws.lb.ListenerRule(
+        attachmentResources.push(new aws.lb.ListenerRule(
           $`${listenerName}-rule-${ruleIndex}`,
           {
             listenerArn: listenerResources[listenerName].arn,
@@ -518,7 +519,7 @@ component.implement("aws", {
             },
           },
           awsOpts,
-        );
+        ));
       }
     }
 
@@ -534,14 +535,25 @@ component.implement("aws", {
           ]),
         ),
       ),
-      targetGroupArns: pulumi.output(
-        Object.fromEntries(
-          Object.entries(targetGroupResources).map(([name, targetGroup]) => [
-            name,
-            targetGroup.arn,
-          ]),
-        ),
-      ),
+      // Target-group ARNs resolve only after every listener and rule exists,
+      // so a consumer's attachment lookup never races the attachment itself.
+      targetGroupArns: pulumi
+        .all([
+          pulumi.output(
+            Object.fromEntries(
+              Object.entries(targetGroupResources).map(([name, targetGroup]) => [
+                name,
+                targetGroup.arn,
+              ]),
+            ),
+          ),
+          pulumi.output(
+            [...Object.values(listenerResources), ...attachmentResources].map(
+              (resource) => resource.urn,
+            ),
+          ),
+        ])
+        .apply(([arns]) => arns),
       securityGroupId: securityGroup.id,
     };
   },

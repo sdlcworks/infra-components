@@ -412,11 +412,17 @@ function assumeRolePolicy(servicePrincipal: string): string {
   });
 }
 
-function inlinePolicyDocument(statements: Array<Record<string, any>>): string {
-  return JSON.stringify({
-    Version: AWS_POLICY_VERSION,
-    Statement: statements,
-  });
+function inlinePolicyDocument(
+  statements: Array<Record<string, any>>,
+): pulumi.Output<string> {
+  // Statements may carry Pulumi Outputs (config-referenced ARNs); resolve them
+  // before serialization or the raw Output object corrupts the policy JSON.
+  return pulumi.output(statements).apply((resolved) =>
+    JSON.stringify({
+      Version: AWS_POLICY_VERSION,
+      Statement: resolved,
+    }),
+  );
 }
 
 function credentialsFrom(getCredentials: () => unknown): AwsCredentials {
