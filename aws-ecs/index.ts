@@ -905,7 +905,7 @@ function containerDefinitions(
   serviceName: string,
   region: string,
   image: string,
-): string {
+): any[] {
   const portMappings = service.port
     ? [
         {
@@ -917,7 +917,10 @@ function containerDefinitions(
       ]
     : undefined;
 
-  return JSON.stringify([
+  // Values may carry live Pulumi Outputs (config-referenced env); never
+  // serialize here — premature stringification freezes an Output's warning
+  // text into the persisted template before output resolution runs.
+  return [
     {
       name: CONTAINER_NAME,
       image,
@@ -957,7 +960,7 @@ function containerDefinitions(
         },
       },
     },
-  ]);
+  ];
 }
 
 export function taskTemplate(
@@ -977,8 +980,11 @@ export function taskTemplate(
     memory: String(service.memoryMb),
     executionRoleArn,
     taskRoleArn,
-    containerDefinitions: JSON.parse(
-      containerDefinitions(service, serviceName, region, image),
+    containerDefinitions: containerDefinitions(
+      service,
+      serviceName,
+      region,
+      image,
     ),
     runtimePlatform: {
       operatingSystemFamily: "LINUX",
@@ -1823,12 +1829,12 @@ component.implement("aws", {
           containerDefinitions: pulumi
             .all([seedImageUri])
             .apply(([seedImage]) =>
-              containerDefinitions(
+              pulumi.output(containerDefinitions(
                 service,
                 serviceName,
                 creds.AWS_REGION,
                 deployedImage ?? seedImage,
-              ),
+              )).apply((defs) => JSON.stringify(defs)),
             ),
           runtimePlatform: {
             operatingSystemFamily: "LINUX",
