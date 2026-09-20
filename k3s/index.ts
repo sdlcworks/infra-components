@@ -2511,17 +2511,16 @@ loki.write "grafana_cloud" {
       });
 
       if (!patchRes.ok) {
-        const errText = await patchRes.text();
-        throw new Error(
-          `Failed to patch ${workloadType} "${componentName}": ${patchRes.status} ${errText}`,
-        );
+        throw new Error(`rollout-patch-failed: ${apiPath} HTTP ${patchRes.status}`);
       }
 
-      if (workloadType !== "cron-job") {
-        await waitForRollout(k8sServer, apiPath, tlsOpts, componentName);
+      const witness = await acceptedRollout(patchRes, workloadType, componentName, imageUri, apiPath);
+      if (workloadType === "cron-job") {
+        console.error(`✓ Accepted template update for ${apiPath}`);
+      } else {
+        await waitForRollout(k8sServer, apiPath, tlsOpts, witness);
+        console.error(`✓ Successfully deployed ${imageUri} to ${componentName}`);
       }
-
-      console.error(`✓ Successfully deployed ${imageUri} to ${componentName}`);
     }
   },
 
@@ -4345,9 +4344,12 @@ async function k8sFetch(
         cert: tlsOpts.cert,
         key: tlsOpts.key,
         rejectUnauthorized: true,
+        signal: init.signal ?? undefined,
       },
       (res) => {
         const chunks: Buffer[] = [];
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("response-aborted")));
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => {
           const responseBody = Buffer.concat(chunks).toString();
@@ -4435,48 +4437,261 @@ function k8sPatchBody(
   };
 }
 
+const rolloutCount = z.number().int().nonnegative();
+const rolloutResource = z.object({
+  kind: z.string(),
+  metadata: z.object({
+    uid: z.string().min(1),
+    generation: rolloutCount.positive(),
+  }),
+  spec: z.object({
+    replicas: rolloutCount.optional(),
+    template: z
+      .object({
+        spec: z.object({
+          containers: z.array(
+            z.object({ name: z.string(), image: z.string() }),
+          ),
+        }),
+      })
+      .optional(),
+    jobTemplate: z
+      .object({
+        spec: z.object({
+          template: z.object({
+            spec: z.object({
+              containers: z.array(
+                z.object({ name: z.string(), image: z.string() }),
+              ),
+            }),
+          }),
+        }),
+      })
+      .optional(),
+    updateStrategy: z
+      .object({
+        type: z.string(),
+        rollingUpdate: z
+          .object({ partition: rolloutCount.optional() })
+          .optional(),
+      })
+      .optional(),
+  }),
+  status: z
+    .object({
+      observedGeneration: rolloutCount.optional(),
+      replicas: rolloutCount.optional(),
+      updatedReplicas: rolloutCount.optional(),
+      availableReplicas: rolloutCount.optional(),
+      readyReplicas: rolloutCount.optional(),
+      desiredNumberScheduled: rolloutCount.optional(),
+      updatedNumberScheduled: rolloutCount.optional(),
+      numberAvailable: rolloutCount.optional(),
+      currentRevision: z.string().optional(),
+      updateRevision: z.string().optional(),
+      conditions: z
+        .array(
+          z.object({
+            type: z.string(),
+            status: z.string(),
+            reason: z.string().optional(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
+});
+type RolloutResource = z.infer<typeof rolloutResource>;
+type RolloutWitness = {
+  uid: string;
+  generation: number;
+  kind: string;
+  component: string;
+  image: string;
+};
+
+function rolloutImage(
+  resource: RolloutResource,
+  component: string,
+): string | undefined {
+  const template =
+    resource.kind === "CronJob"
+      ? resource.spec.jobTemplate?.spec.template
+      : resource.spec.template;
+  const matches = template?.spec.containers.filter(
+    (container) => container.name === component,
+  );
+  return matches?.length === 1 ? matches[0]?.image : undefined;
+}
+
+async function acceptedRollout(
+  response: Response,
+  type: string,
+  component: string,
+  image: string,
+  path: string,
+): Promise<RolloutWitness> {
+  let decoded: unknown;
+  try {
+    decoded = await response.json();
+  } catch {
+    throw new Error(`rollout-acceptance-invalid: ${path}`);
+  }
+  const accepted = rolloutResource.safeParse(decoded);
+  const kind = {
+    deployment: "Deployment",
+    "stateful-set": "StatefulSet",
+    "daemon-set": "DaemonSet",
+    "cron-job": "CronJob",
+  }[type];
+  if (
+    !accepted.success ||
+    accepted.data.kind !== kind ||
+    rolloutImage(accepted.data, component) !== image
+  ) {
+    throw new Error(`rollout-acceptance-invalid: ${path}`);
+  }
+  return {
+    uid: accepted.data.metadata.uid,
+    generation: accepted.data.metadata.generation,
+    kind,
+    component,
+    image,
+  };
+}
+
+function rolloutComplete(
+  resource: RolloutResource,
+  witness: RolloutWitness,
+  path: string,
+): boolean {
+  const identity = `${path} uid=${witness.uid} generation=${witness.generation}`;
+  if (
+    resource.metadata.uid !== witness.uid ||
+    resource.metadata.generation !== witness.generation ||
+    resource.kind !== witness.kind ||
+    rolloutImage(resource, witness.component) !== witness.image
+  ) {
+    throw new Error(`rollout-superseded: ${identity}`);
+  }
+  const status = resource.status;
+  if (!status) throw new Error(`rollout-observation-invalid: ${identity}`);
+  if (
+    resource.kind !== "Deployment" &&
+    resource.spec.updateStrategy?.type !== "RollingUpdate"
+  ) {
+    throw new Error(`rollout-strategy-unsupported: ${identity}`);
+  }
+  if ((status.observedGeneration ?? 0) < witness.generation) return false;
+  if (resource.kind === "Deployment") {
+    if (
+      status.conditions?.some(
+        (condition) =>
+          condition.type === "Progressing" &&
+          condition.reason === "ProgressDeadlineExceeded",
+      )
+    ) {
+      throw new Error(`rollout-progress-deadline: ${identity}`);
+    }
+    const desired = resource.spec.replicas;
+    if (desired === undefined)
+      throw new Error(`rollout-observation-invalid: ${identity}`);
+    const updated = status.updatedReplicas ?? 0;
+    if (desired === 0)
+      return (
+        updated === 0 &&
+        (status.replicas ?? 0) === 0 &&
+        (status.availableReplicas ?? 0) === 0
+      );
+    return (
+      updated >= desired &&
+      (status.replicas ?? 0) <= updated &&
+      (status.availableReplicas ?? 0) >= updated
+    );
+  }
+  if (resource.kind === "DaemonSet") {
+    const desired = status.desiredNumberScheduled;
+    if (desired === undefined)
+      throw new Error(`rollout-observation-invalid: ${identity}`);
+    return (
+      (status.updatedNumberScheduled ?? 0) >= desired &&
+      (status.numberAvailable ?? 0) >= desired
+    );
+  }
+  const desired = resource.spec.replicas;
+  if (desired === undefined)
+    throw new Error(`rollout-observation-invalid: ${identity}`);
+  if ((status.readyReplicas ?? 0) < desired) return false;
+  const rolling = resource.spec.updateStrategy?.rollingUpdate;
+  if (rolling)
+    return (
+      (status.updatedReplicas ?? 0) >=
+      Math.max(0, desired - (rolling.partition ?? 0))
+    );
+  if (desired === 0) return (status.replicas ?? 0) === 0;
+  return (
+    Boolean(status.updateRevision) &&
+    status.currentRevision === status.updateRevision
+  );
+}
+
 async function waitForRollout(
   server: string,
   apiPath: string,
   tls: K8sTlsOpts,
-  componentName: string,
+  witness: RolloutWitness,
 ): Promise<void> {
-  const intervalMs = 3_000;
-  const maxAttempts = 100; // 5 minutes
-
-  console.error(`  Waiting for rollout of ${componentName}...`);
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-
-    const res = await k8sFetch(server, apiPath, tls);
-    if (!res.ok) {
-      console.error(`  Warning: failed to poll rollout status (${res.status})`);
-      break;
+  const controller = new AbortController();
+  const identity = `${apiPath} uid=${witness.uid} generation=${witness.generation}`;
+  const expires = Date.now() + 300_000;
+  const timeoutError = new Error(`rollout-timeout: ${identity}`);
+  let timeout: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, 300_000);
+  });
+  const poll = async () => {
+    while (true) {
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(3_000, Math.max(0, expires - Date.now()))),
+      );
+      if (Date.now() >= expires) throw timeoutError;
+      let response: Response;
+      try {
+        response = await k8sFetch(server, apiPath, tls, {
+          signal: controller.signal,
+        });
+      } catch {
+        throw controller.signal.aborted
+          ? timeoutError
+          : new Error(`rollout-read-failed: ${identity}`);
+      }
+      if (!response.ok)
+        throw new Error(
+          `rollout-read-failed: ${identity} HTTP ${response.status}`,
+        );
+      let decoded: unknown;
+      try {
+        decoded = await response.json();
+      } catch {
+        throw new Error(`rollout-observation-invalid: ${identity}`);
+      }
+      const observation = rolloutResource.safeParse(decoded);
+      if (!observation.success)
+        throw new Error(`rollout-observation-invalid: ${identity}`);
+      if (Date.now() >= expires) throw timeoutError;
+      if (rolloutComplete(observation.data, witness, apiPath)) return;
     }
-
-    const resource = (await res.json()) as {
-      metadata: { generation?: number };
-      status: {
-        observedGeneration?: number;
-        conditions?: Array<{ type: string; status: string }>;
-      };
-    };
-
-    const generation = resource.metadata.generation ?? 1;
-    const observed = resource.status.observedGeneration ?? 0;
-    const availableCond = resource.status.conditions?.find(
-      (c) => c.type === "Available",
-    );
-
-    if (generation === observed && availableCond?.status === "True") {
-      return;
-    }
+  };
+  console.error(`  Waiting for rollout of ${identity}...`);
+  try {
+    await Promise.race([poll(), deadline]);
+  } finally {
+    clearTimeout(timeout!);
+    controller.abort();
   }
-
-  console.error(
-    `  ⚠️  Rollout of ${componentName} did not complete within timeout — it may still succeed in the background`,
-  );
 }
 
 // ---- Workload Builder Helpers ----
