@@ -35,7 +35,11 @@ register.implement("cloudflare", {
 
     const results: Record<string, pulumi.Output<string>> = {};
 
-    const provider = (ctx as any).cloudflare as cloudflare.Provider;
+    const provider =
+      ((ctx as any).cloudflare as cloudflare.Provider | undefined) ??
+      new cloudflare.Provider($`cloudflare`, {
+        apiToken: creds.CLOUDFLARE_API_TOKEN,
+      });
     const opts = { provider };
 
     const zone = cloudflare.getZoneOutput(
