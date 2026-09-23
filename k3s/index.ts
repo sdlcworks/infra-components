@@ -28,6 +28,11 @@ import {
   type AwsK3sConfig,
 } from "./aws";
 import { SecretValueWaiter } from "./aws-secret";
+import {
+  IngressRuleSchema,
+  ruleNeedsTraefikRoute,
+  traefikRouteMatch,
+} from "./ingress-vocabulary";
 
 // ---- Zod Enums for Config Options ----
 
@@ -206,16 +211,13 @@ const TolerationSchema = z.object({
   tolerationSeconds: z.number().optional(),
 });
 
-// Ingress rule definition for Deployment workloads.
-const IngressRuleSchema = z.object({
-  host: z.string().describe("Hostname, e.g. api.example.com"),
-  path: z.string().default("/"),
-  pathType: z
-    .enum(["Prefix", "Exact", "ImplementationSpecific"])
-    .default("Prefix"),
-  // Override the service port for this specific rule; defaults to servicePort.
-  servicePort: z.number().optional(),
-});
+// Traefik furniture names shared by the cluster provision (which configures the
+// ACME resolver and the redirect middleware) and the per-rule materialization
+// below (which references them).
+const ACME_RESOLVER_NAME = "letsencrypt";
+const ACME_STORAGE_PATH = "/data/acme.json";
+const TRAEFIK_CRD_API_VERSION = "traefik.io/v1alpha1";
+const HTTPS_REDIRECT_MIDDLEWARE_NAME = "https-redirect";
 
 const IngressConfigSchema = z.object({
   rules: z.array(IngressRuleSchema).min(1),
@@ -637,6 +639,16 @@ const component = new InfraComponent({
       .boolean()
       .default(false)
       .describe("Disable the built-in Traefik ingress controller"),
+    acmeContact: z
+      .string()
+      .optional()
+      .describe(
+        "ACME account contact for publicly-trusted certificate issuance. " +
+          "When set (and Traefik is enabled), the cluster configures the " +
+          `'${ACME_RESOLVER_NAME}' resolver; ingress rules may then declare publicTrust. ` +
+          "Configured by the Google Cloud realization only — a publicTrust rule on " +
+          "an AWS-provisioned cluster would reference a resolver that was never set up.",
+      ),
     disableServiceLb: z
       .boolean()
       .default(false)
@@ -1625,6 +1637,58 @@ component.implement("gcloud", {
     state.defaultK8sProvider = defaultK8sProvider;
     state.defaultNamespace = defaultNamespace;
 
+    // ---- 8b-2. ACME resolver + HTTPS redirect middleware ----
+    //
+    // HelmChartConfig is merged into the k3s-managed Traefik chart by k3s's
+    // helm controller; applying it restarts the Traefik pod (brief edge blip).
+    // acme.json must be 0600 and owned by Traefik's uid, hence the init
+    // container. HTTP-01 keeps proof-of-control on the direct name itself —
+    // no DNS-authority credential enters the cluster.
+    if (inputs.acmeContact && !disableTraefik) {
+      new k8s.apiextensions.CustomResource(
+        $`traefik-acme`,
+        {
+          apiVersion: "helm.cattle.io/v1",
+          kind: "HelmChartConfig",
+          metadata: { name: "traefik", namespace: "kube-system" },
+          spec: {
+            valuesContent: [
+              "additionalArguments:",
+              `  - "--certificatesresolvers.${ACME_RESOLVER_NAME}.acme.email=${inputs.acmeContact}"`,
+              `  - "--certificatesresolvers.${ACME_RESOLVER_NAME}.acme.storage=${ACME_STORAGE_PATH}"`,
+              `  - "--certificatesresolvers.${ACME_RESOLVER_NAME}.acme.httpchallenge.entrypoint=web"`,
+              "persistence:",
+              "  enabled: true",
+              "  path: /data",
+              "deployment:",
+              "  initContainers:",
+              "    - name: volume-permissions",
+              "      image: busybox:1.36.1",
+              '      command: ["sh", "-c", "touch /data/acme.json && chmod 600 /data/acme.json && chown 65532:65532 /data/acme.json"]',
+              "      volumeMounts:",
+              "        - name: data",
+              "          mountPath: /data",
+            ].join("\n"),
+          },
+        },
+        { provider: defaultK8sProvider },
+      );
+
+      new k8s.apiextensions.CustomResource(
+        $`https-redirect`,
+        {
+          apiVersion: TRAEFIK_CRD_API_VERSION,
+          kind: "Middleware",
+          metadata: {
+            name: HTTPS_REDIRECT_MIDDLEWARE_NAME,
+            namespace: "components",
+          },
+          spec: { redirectScheme: { scheme: "https", permanent: true } },
+        },
+        { provider: defaultK8sProvider, dependsOn: [defaultNamespace] },
+      );
+    }
+
     // ---- 8c. Deploy monitoring (Grafana — hosted or self-hosted) ----
 
     if (inputs.monitoring.enabled) {
@@ -2341,42 +2405,122 @@ loki.write "grafana_cloud" {
     if (workloadConfig.workloadType === "deployment") {
       const deployConfig = workloadConfig as DeploymentConfig;
       if (deployConfig.ingress) {
-        new k8s.networking.v1.Ingress(
-          $`ingress-${name}`,
-          {
-            metadata: {
-              name,
-              namespace: namespaceName,
-              annotations: deployConfig.ingress.annotations,
-            },
-            spec: {
-              tls: deployConfig.ingress.tls?.map((t) => ({
-                hosts: t.hosts,
-                secretName: t.secretName,
-              })),
-              rules: deployConfig.ingress.rules.map((rule) => ({
-                host: rule.host,
-                http: {
-                  paths: [
-                    {
-                      path: rule.path,
-                      pathType: rule.pathType,
-                      backend: {
-                        service: {
-                          name,
-                          port: {
-                            number: rule.servicePort ?? deployConfig.servicePort,
+        const vanillaRules = deployConfig.ingress.rules.filter(
+          (r) => !ruleNeedsTraefikRoute(r),
+        );
+        const traefikRules = deployConfig.ingress.rules
+          .map((rule, idx) => ({ rule, idx }))
+          .filter(({ rule }) => ruleNeedsTraefikRoute(rule));
+
+        if (vanillaRules.length > 0) {
+          new k8s.networking.v1.Ingress(
+            $`ingress-${name}`,
+            {
+              metadata: {
+                name,
+                namespace: namespaceName,
+                annotations: deployConfig.ingress.annotations,
+              },
+              spec: {
+                tls: deployConfig.ingress.tls?.map((t) => ({
+                  hosts: t.hosts,
+                  secretName: t.secretName,
+                })),
+                rules: vanillaRules.map((rule) => ({
+                  host: rule.host,
+                  http: {
+                    paths: [
+                      {
+                        path: rule.path,
+                        pathType: rule.pathType,
+                        backend: {
+                          service: {
+                            name,
+                            port: {
+                              number: rule.servicePort ?? deployConfig.servicePort,
+                            },
                           },
                         },
                       },
+                    ],
+                  },
+                })),
+              },
+            },
+            workloadOpts,
+          );
+        }
+
+        for (const { rule, idx } of traefikRules) {
+          const match = traefikRouteMatch(rule);
+          const service = {
+            name,
+            port: rule.servicePort ?? deployConfig.servicePort,
+          };
+          new k8s.apiextensions.CustomResource(
+            $`ingressroute-${name}-${idx}`,
+            {
+              apiVersion: TRAEFIK_CRD_API_VERSION,
+              kind: "IngressRoute",
+              metadata: { name: `${name}-ir${idx}`, namespace: namespaceName },
+              spec: {
+                entryPoints: rule.publicTrust ? ["websecure"] : ["web", "websecure"],
+                routes: [
+                  {
+                    kind: "Rule",
+                    match,
+                    ...(rule.precedence !== undefined
+                      ? { priority: rule.precedence }
+                      : {}),
+                    services: [service],
+                  },
+                ],
+                ...(rule.publicTrust
+                  ? { tls: { certResolver: ACME_RESOLVER_NAME } }
+                  : {}),
+              },
+            },
+            workloadOpts,
+          );
+
+          if (rule.publicTrust) {
+            // Same claim on the plaintext entrypoint redirects to TLS; ACME
+            // HTTP-01 is answered by Traefik before routing, so issuance is
+            // unaffected. Scoped per-rule so hosts without publicTrust (e.g.
+            // proxied hosts with flexible origin TLS) keep today's behavior.
+            new k8s.apiextensions.CustomResource(
+              $`ingressroute-${name}-${idx}-web`,
+              {
+                apiVersion: TRAEFIK_CRD_API_VERSION,
+                kind: "IngressRoute",
+                metadata: {
+                  name: `${name}-ir${idx}-web`,
+                  namespace: namespaceName,
+                },
+                spec: {
+                  entryPoints: ["web"],
+                  routes: [
+                    {
+                      kind: "Rule",
+                      match,
+                      ...(rule.precedence !== undefined
+                        ? { priority: rule.precedence }
+                        : {}),
+                      middlewares: [
+                        {
+                          name: HTTPS_REDIRECT_MIDDLEWARE_NAME,
+                          namespace: namespaceName,
+                        },
+                      ],
+                      services: [service],
                     },
                   ],
                 },
-              })),
-            },
-          },
-          workloadOpts,
-        );
+              },
+              workloadOpts,
+            );
+          }
+        }
       }
     }
 
@@ -2403,9 +2547,14 @@ loki.write "grafana_cloud" {
         ? (workloadConfig as DeploymentConfig).ingress
         : undefined;
     const requiredHost = ingress?.rules[0]?.host;
+    const publicTrustOnRequiredHost = Boolean(
+      requiredHost &&
+        ingress?.rules.some((r) => r.host === requiredHost && r.publicTrust),
+    );
     const publicProtocol =
       requiredHost &&
-      ingress?.tls?.some((entry) => entry.hosts.includes(requiredHost))
+      (publicTrustOnRequiredHost ||
+        ingress?.tls?.some((entry) => entry.hosts.includes(requiredHost)))
         ? "https"
         : requiredHost
           ? "http"
