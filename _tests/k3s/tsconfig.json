@@ -3,6 +3,8 @@
   "include": [
     "../../k3s/aws.ts",
     "../../k3s/aws-secret.ts",
-    "./aws-ec2-intent.test.ts"
+    "../../k3s/ingress-vocabulary.ts",
+    "./aws-ec2-intent.test.ts",
+    "./ingress-envelope-vocabulary.test.ts"
   ]
 }
