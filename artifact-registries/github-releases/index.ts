@@ -18,6 +18,9 @@ const registry = new ArtifactRegistry({
     owner: z.string(),
     repo: z.string(),
   }),
+});
+
+registry.implement("github", {
   provision: async ({ config, state }) => {
     // No cloud resources needed — GitHub Releases is built into GitHub.
     // Persist config values to state so they're available during publish().
