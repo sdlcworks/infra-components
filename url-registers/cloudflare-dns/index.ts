@@ -21,6 +21,9 @@ import {
 const register = new URLRegister({
   interface: PublicCI,
   configSchema: ConfigSchema,
+});
+
+register.implement("cloudflare", {
   provision: async (ctx) => {
     // The framework's InferZodType wraps every top-level config field in
     // PulumiInput<T> (to accept Outputs from upstream resolutions). In practice
