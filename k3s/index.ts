@@ -868,7 +868,21 @@ component.implement("gcloud", {
     gcp: gcpProvider,
   }) => {
     // Default opts for all GCP resources — uses the explicit provider from gen.ts
-    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider ? { provider: gcpProvider } : {};
+    const gcpCreds = getCredentials() as
+      | { GCP_SERVICE_ACCOUNT_KEY?: string; GCP_PROJECT_ID?: string; GCP_REGION?: string }
+      | undefined;
+    const resolvedGcpProvider =
+      gcpProvider ??
+      (gcpCreds?.GCP_SERVICE_ACCOUNT_KEY
+        ? new gcp.Provider($`gcp`, {
+            credentials: gcpCreds.GCP_SERVICE_ACCOUNT_KEY,
+            project: gcpCreds.GCP_PROJECT_ID,
+            region: gcpCreds.GCP_REGION,
+          })
+        : undefined);
+    const gcpOpts: pulumi.CustomResourceOptions = resolvedGcpProvider
+      ? { provider: resolvedGcpProvider }
+      : {};
 
     const {
       nodes,
