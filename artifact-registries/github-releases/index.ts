@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { readFileSync } from "node:fs";
 import {
   ArtifactRegistry,
   DeploymentArtifactType,
@@ -106,17 +105,20 @@ registry.implement("github", {
     // (e.g. CLI binaries) don't collide within the shared release tag.
     const uploaded: Record<string, { uri: string }> = {};
     for (const [label, artifact] of Object.entries(artifacts)) {
-      const binary = readFileSync(artifact.uri);
       const assetName = `${componentName}-${label}`;
 
+      // Bun.file streams the body from disk without buffering it, and
+      // `timeout: false` lifts Bun's default 300s fetch deadline — these
+      // multi-hundred-MB uploads must be allowed to run to completion.
       const uploadRes = await fetch(`${uploadUrl}?name=${assetName}`, {
         method: "POST",
         headers: {
           ...headers,
           "Content-Type": "application/octet-stream",
         },
-        body: binary,
-      });
+        body: Bun.file(artifact.uri),
+        timeout: false,
+      } as RequestInit);
 
       if (!uploadRes.ok) {
         const err = await uploadRes.text();
