@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { createReadStream, statSync } from "node:fs";
+import { request } from "node:https";
 import {
   ArtifactRegistry,
   DeploymentArtifactType,
@@ -107,27 +109,44 @@ registry.implement("github", {
     for (const [label, artifact] of Object.entries(artifacts)) {
       const assetName = `${componentName}-${label}`;
 
-      // Bun.file streams the body from disk without buffering it, and
-      // `timeout: false` lifts Bun's default 300s fetch deadline — these
-      // multi-hundred-MB uploads must be allowed to run to completion.
-      const uploadRes = await fetch(`${uploadUrl}?name=${assetName}`, {
-        method: "POST",
-        headers: {
-          ...headers,
-          "Content-Type": "application/octet-stream",
+      // node:https streams the body from disk without buffering it and
+      // carries no default deadline — the runtime is node (fetch/undici's
+      // 300s body timeout killed these multi-hundred-MB uploads), so the
+      // upload must bypass fetch entirely.
+      const target = new URL(`${uploadUrl}?name=${assetName}`);
+      const uploadRes = await new Promise<{ status: number; body: string }>(
+        (resolve, reject) => {
+          const req = request(
+            {
+              method: "POST",
+              hostname: target.hostname,
+              path: `${target.pathname}${target.search}`,
+              headers: {
+                ...headers,
+                "Content-Type": "application/octet-stream",
+                "Content-Length": statSync(artifact.uri).size,
+              },
+            },
+            (res) => {
+              let body = "";
+              res.on("data", (chunk) => (body += chunk));
+              res.on("end", () =>
+                resolve({ status: res.statusCode ?? 0, body }),
+              );
+            },
+          );
+          req.on("error", reject);
+          createReadStream(artifact.uri).on("error", reject).pipe(req);
         },
-        body: Bun.file(artifact.uri),
-        timeout: false,
-      } as RequestInit);
+      );
 
-      if (!uploadRes.ok) {
-        const err = await uploadRes.text();
+      if (uploadRes.status < 200 || uploadRes.status >= 300) {
         throw new Error(
-          `Failed to upload release asset '${assetName}': ${uploadRes.status} ${err}`,
+          `Failed to upload release asset '${assetName}': ${uploadRes.status} ${uploadRes.body}`,
         );
       }
 
-      const asset = (await uploadRes.json()) as {
+      const asset = JSON.parse(uploadRes.body) as {
         browser_download_url: string;
       };
       console.error(`Uploaded '${assetName}' to ${asset.browser_download_url}`);
