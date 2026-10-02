@@ -11,6 +11,7 @@ import {
   type ProxiedRoute,
 } from "./dns-cloudflare";
 import { provisionGcpLb } from "./ingress-gcp";
+import { cloudflareProviderFromCredentials } from "../../_internal/cloudflare-provider";
 
 // Single URL register that owns the co-required invariant: a public hostname
 // is BOTH published in DNS AND accepted by the backend's ingress. Splitting
@@ -62,7 +63,10 @@ register.implement("cloudflare", {
     const config = ctx.config as unknown as Config;
     const { components, $ } = ctx;
 
-    const cfProvider = (ctx as any).cloudflare as cloudflare.Provider;
+    const cfProvider = cloudflareProviderFromCredentials(
+      $`cf-provider`,
+      ctx.getCredentials,
+    );
     const cfCreds = ctx.getCredentials() as { CLOUDFLARE_ACCOUNT_ID?: string };
     const accountId = cfCreds.CLOUDFLARE_ACCOUNT_ID;
     if (!accountId) {

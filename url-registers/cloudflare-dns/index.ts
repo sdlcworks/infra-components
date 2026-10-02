@@ -3,11 +3,11 @@ import * as cloudflare from "@pulumi/cloudflare";
 import { URLRegister } from "@sdlcworks/components";
 import { PublicCI } from "../../_internal/interfaces";
 import { LOG_PREFIX } from "./constants";
+import { cloudflareProviderFromCredentials } from "../../_internal/cloudflare-provider";
 import type { CloudCredentialCloudflare } from "@sdlcworks/components";
 import { ConfigSchema, type Config, isWorkerRecord } from "./schema";
 import {
   buildComponentResultUri,
-  buildWorkerResultUri,
   createDnsRecord,
   createHostRewriteWorker,
   createWorkerCustomDomain,
@@ -35,7 +35,10 @@ register.implement("cloudflare", {
 
     const results: Record<string, pulumi.Output<string>> = {};
 
-    const provider = (ctx as any).cloudflare as cloudflare.Provider;
+    const provider = cloudflareProviderFromCredentials(
+      $`cf-provider`,
+      ctx.getCredentials,
+    );
     const opts = { provider };
 
     const zone = cloudflare.getZoneOutput(
@@ -199,7 +202,9 @@ register.implement("cloudflare", {
           domain: config.domain,
         });
 
-        results[key] = buildWorkerResultUri(fqdn);
+        // Worker records are config-driven publications, not component-bound:
+        // the orchestrator maps every result key through the declared component
+        // table, so only component-keyed entries may be returned.
       }
     }
 

@@ -42,7 +42,7 @@ function pulumiCtx(buildArtifacts: Record<string, unknown>): any {
     inputs: cloudflareInputs(),
     state: {},
     buildArtifacts,
-    cloudflare: undefined,
+    getCredentials: () => ({ CLOUDFLARE_API_TOKEN: "cf-token" }),
   };
 }
 

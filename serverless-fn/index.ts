@@ -26,6 +26,7 @@ import {
   PostgresCI,
 } from "../_internal/interfaces";
 
+import { cloudflareProviderFromCredentials } from "../_internal/cloudflare-provider";
 import {
   mintGcpAccessToken,
   waitForCloudRunOperation,
@@ -859,7 +860,7 @@ component.implement("cloudflare", {
     inputs,
     state,
     buildArtifacts,
-    cloudflare: cfProvider,
+    getCredentials,
   }) => {
     const {
       accountId,
@@ -874,14 +875,13 @@ component.implement("cloudflare", {
       cfBindings,
     } = inputs;
 
-    // Default opts for all Cloudflare resources — uses the explicit provider
-    const cfOpts: pulumi.CustomResourceOptions = cfProvider
-      ? { provider: cfProvider }
-      : {};
-
     if (!accountId) {
       throw new Error("accountId is required for Cloudflare provider");
     }
+
+    const cfOpts: pulumi.CustomResourceOptions = {
+      provider: cloudflareProviderFromCredentials($`cf-provider`, getCredentials),
+    };
 
     // Generate script name
     const scriptName = $`worker`;
