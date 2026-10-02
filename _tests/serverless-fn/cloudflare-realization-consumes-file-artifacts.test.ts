@@ -150,6 +150,18 @@ describe("cloudflare realization: artifact updates", () => {
     }
   });
 
+  test("provision records the script settings deploys must replay", async () => {
+    const cloudflare = (await loadServerlessFn()).default.providers.cloudflare;
+    const ctx = pulumiCtx({});
+    await cloudflare.pulumi(ctx);
+    expect(ctx.state.scriptSettings).toBeDefined();
+    expect(ctx.state.scriptSettings.compatibility_flags).toEqual([
+      "nodejs_compat",
+    ]);
+    expect(ctx.state.scriptSettings.compatibility_date).toBe("2024-01-01");
+    expect(Array.isArray(ctx.state.scriptSettings.bindings)).toBe(true);
+  });
+
   test("uploads the script content from a file:// artifact", async () => {
     const cloudflare = (await loadServerlessFn()).default.providers.cloudflare;
     const scriptPath = writeScriptFile();
@@ -167,7 +179,15 @@ describe("cloudflare realization: artifact updates", () => {
             artifact: { type: "file", uri: pathToFileURL(scriptPath).href },
           },
         },
-        state: { scriptName: "worker", accountId: "cf-account" },
+        state: {
+          scriptName: "worker",
+          accountId: "cf-account",
+          scriptSettings: {
+            compatibility_date: "2024-01-01",
+            compatibility_flags: ["nodejs_compat"],
+            bindings: [{ type: "d1", name: "DB", id: "d1-id" }],
+          },
+        },
         getCredentials: () => ({ CLOUDFLARE_API_TOKEN: "token" }),
       }) as any);
 
@@ -177,6 +197,12 @@ describe("cloudflare realization: artifact updates", () => {
       );
       const scriptPart = requests[0].body.get("index.js");
       expect(await (scriptPart as Blob).text()).toBe(SCRIPT_CONTENT);
+      const metadataPart = requests[0].body.get("metadata");
+      const metadata = JSON.parse(await (metadataPart as Blob).text());
+      expect(metadata.main_module).toBe("index.js");
+      expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
+      expect(metadata.compatibility_date).toBe("2024-01-01");
+      expect(metadata.bindings).toEqual([{ type: "d1", name: "DB", id: "d1-id" }]);
     } finally {
       globalThis.fetch = originalFetch;
     }

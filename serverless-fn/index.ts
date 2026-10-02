@@ -847,6 +847,13 @@ component.implement("cloudflare", {
     scriptName: z.string(),
     accountId: z.string(),
     workerUri: z.string(),
+    scriptSettings: z
+      .object({
+        compatibility_date: z.string(),
+        compatibility_flags: z.array(z.string()),
+        bindings: z.array(z.record(z.string(), z.any())),
+      })
+      .optional(),
     allocations: z.record(z.string(), z.object({
       scriptName: z.string(),
       accountId: z.string(),
@@ -960,6 +967,48 @@ component.implement("cloudflare", {
       })),
     ];
 
+    // The raw script-upload API used at deploy time (upsertArtifacts) replaces
+    // the worker's full settings, so the same metadata the resource declares
+    // here must be replayed there; persisted in the API's own wire shape
+    // (snake_case fields, d1 bindings keyed by `id`).
+    state.scriptSettings = {
+      compatibility_date: compatibilityDate || "2024-01-01",
+      compatibility_flags: compatibilityFlags || ["nodejs_compat"],
+      bindings: [
+        ...environmentVariables.map((env) => ({
+          type: "plain_text",
+          name: env.name,
+          text: env.value,
+        })),
+        ...(cfBindings?.r2 || []).map((binding) => ({
+          type: "r2_bucket",
+          name: binding.name,
+          bucket_name: binding.bucketName,
+        })),
+        ...(cfBindings?.services || []).map((binding) => ({
+          type: "service",
+          name: binding.name,
+          service: binding.service,
+          ...(binding.environment ? { environment: binding.environment } : {}),
+        })),
+        ...(cfBindings?.kv || []).map((binding) => ({
+          type: "kv_namespace",
+          name: binding.name,
+          namespace_id: binding.namespaceId,
+        })),
+        ...(cfBindings?.d1 || []).map((binding) => ({
+          type: "d1",
+          name: binding.name,
+          id: binding.databaseId,
+        })),
+        ...(cfBindings?.queues || []).map((binding) => ({
+          type: "queue",
+          name: binding.name,
+          queue_name: binding.queueName,
+        })),
+      ],
+    };
+
     // Create Workers Script
     const worker = new cloudflare.WorkersScript($`script`, {
       accountId: accountId,
@@ -1013,7 +1062,7 @@ component.implement("cloudflare", {
           zoneId: routing.zoneId,
           pattern: routing.pattern,
           script: scriptName,
-        }, cfOpts);
+        }, { dependsOn: [worker], ...cfOpts });
 
         workerUri = pulumi.interpolate`https://${routing.pattern.replace(
           "/*",
@@ -1026,7 +1075,7 @@ component.implement("cloudflare", {
           zoneId: routing.zoneId,
           hostname: routing.hostname,
           service: scriptName,
-        }, cfOpts);
+        }, { dependsOn: [worker], ...cfOpts });
 
         workerUri = pulumi.interpolate`https://${routing.hostname}`;
       } else {
@@ -1147,11 +1196,24 @@ component.implement("cloudflare", {
     const apiToken = credentials.CLOUDFLARE_API_TOKEN;
     const { accountId, scriptName } = state;
 
+    if (!state.scriptSettings) {
+      throw new Error(
+        `serverless-fn(cloudflare): no script settings recorded for '${state.scriptName}' — ` +
+          `re-provision this branch once so the worker's compatibility flags and bindings ` +
+          `are carried into deploys; uploading without them would strip the live worker's settings.`,
+      );
+    }
+
     // Upload the script to Cloudflare Workers via the API (out-of-state update).
     // This keeps bundled JS code out of Pulumi state.
-    // Uses multipart form upload: metadata part + ES module script part.
+    // Uses multipart form upload: metadata part + ES module script part. The
+    // API replaces the worker's full settings on upload, so the provision-time
+    // settings are replayed alongside the new module.
     const metadata = JSON.stringify({
       main_module: "index.js",
+      compatibility_date: state.scriptSettings.compatibility_date,
+      compatibility_flags: state.scriptSettings.compatibility_flags,
+      bindings: state.scriptSettings.bindings,
     });
 
     const formData = new FormData();
