@@ -55,6 +55,9 @@ type Config = z.infer<typeof ConfigSchema>;
 const register = new URLRegister({
   interface: PublicCI,
   configSchema: ConfigSchema,
+});
+
+register.implement("cloudflare", {
   provision: async (ctx) => {
     const config = ctx.config as unknown as Config;
     const { components, $ } = ctx;

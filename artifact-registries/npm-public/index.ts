@@ -9,6 +9,9 @@ import { stampNpmTarball } from "../../_internal/stamp-npm-tarball";
 const registry = new ArtifactRegistry({
   acceptedArtifactTypes: [DeploymentArtifactType.file],
   configSchema: z.object({}),
+});
+
+registry.implement("npm", {
   provision: async () => {
     // No cloud resources needed — npmjs.com is external.
   },

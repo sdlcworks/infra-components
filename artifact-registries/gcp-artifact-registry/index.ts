@@ -14,6 +14,9 @@ const registry = new ArtifactRegistry({
     location: z.string(),
     repositoryId: z.string(),
   }),
+});
+
+registry.implement("gcloud", {
   provision: async ({ config, state, $, gcp }) => {
     if (!gcp) throw new Error("gcp-artifact-registry requires gcloud provider");
 

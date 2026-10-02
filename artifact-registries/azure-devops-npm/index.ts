@@ -21,6 +21,9 @@ const registry = new ArtifactRegistry({
     feedName: z.string(),
     project: z.string().optional(),
   }),
+});
+
+registry.implement("azure", {
   provision: async ({ config, state }) => {
     // No cloud resources to provision — the feed is created in Azure DevOps
     // out-of-band. Persist config to state so publish() can read it.
