@@ -1083,6 +1083,40 @@ component.implement("cloudflare", {
         };
       },
     }),
+    connectionHandler({
+      interface: PublicCI,
+      handler: async (_ctx: any) => {
+        const allocations = (state.allocations ?? {}) as Record<string, any>;
+        const allocation = allocations[selfComponentName];
+        if (!allocation) {
+          throw new Error(
+            `serverless-fn(cloudflare): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
+          );
+        }
+        // A route-pattern worker's URI hosts a wildcard (e.g. *.example.com),
+        // which cannot serve as a DNS origin target; the zone apex can, and a
+        // proxied record is intercepted by the worker route before the target
+        // is ever contacted.
+        const host = pulumi.output(allocation.workerUri).apply((uri: string) => {
+          if (!uri) return "";
+          try {
+            const hostname = new URL(uri).hostname;
+            return hostname.startsWith("*.") ? hostname.slice(2) : hostname;
+          } catch {
+            return "";
+          }
+        });
+        return {
+          uri: allocation.workerUri,
+          metadata: {
+            appComponentType: "http-service",
+            host,
+            protocol: "https" as const,
+            port: 443,
+          },
+        };
+      },
+    }),
   ]),
 
   upsertArtifacts: async ({ buildArtifacts, state, getCredentials }) => {

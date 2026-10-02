@@ -26,7 +26,7 @@ export function resetCaptured(): void {
 // functions directly with fabricated contexts, so a minimal structural
 // stand-in is sufficient — mirrors _tests/local-macos/load-local-macos.ts.
 mock.module("@pulumi/pulumi", () => ({
-  output: (v: unknown) => v,
+  output: (v: unknown) => ({ apply: (f: (x: unknown) => unknown) => f(v) }),
   Output: {
     isInstance: () => false,
     create: (v: unknown) => v,
