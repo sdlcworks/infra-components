@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
 
 import {
   InfraComponent,
@@ -42,6 +43,10 @@ const DEFAULT_WORKER_SCRIPT = `export default {
     });
   },
 };`;
+
+function artifactFilePath(uri: string): string {
+  return uri.startsWith("file://") ? fileURLToPath(uri) : uri;
+}
 
 // ---- Zod Enums for Config Options ----
 
@@ -186,7 +191,10 @@ const component = new InfraComponent({
     stateful: false,
     proxiable: true,
   },
-  acceptedArtifactTypes: [DeploymentArtifactType.oci_spec_image],
+  acceptedArtifactTypes: [
+    DeploymentArtifactType.oci_spec_image,
+    DeploymentArtifactType.file,
+  ],
   connectionTypes: {
     internal: {
       description: "allows internal VPC communication to this service",
@@ -583,6 +591,16 @@ component.implement("gcloud", {
       ? { provider: gcpProvider }
       : {};
 
+    if (
+      buildArtifact &&
+      buildArtifact.artifact.type !== DeploymentArtifactType.oci_spec_image
+    ) {
+      throw new Error(
+        `serverless-fn(gcloud): expects an OCI image artifact for app component "${name}", ` +
+          `received "${buildArtifact.artifact.type}".`,
+      );
+    }
+
     const containerImage =
       buildArtifact?.artifact?.uri ??
       "us-docker.pkg.dev/cloudrun/container/hello";
@@ -762,6 +780,15 @@ component.implement("gcloud", {
         continue;
       }
 
+      if (
+        artifactInfo.artifact.type !== DeploymentArtifactType.oci_spec_image
+      ) {
+        throw new Error(
+          `serverless-fn(gcloud): expects an OCI image artifact for app component "${componentName}", ` +
+            `received "${artifactInfo.artifact.type}".`,
+        );
+      }
+
       const { serviceName, region } = allocation;
       const imageUri = artifactInfo.artifact.uri;
       const envForComponent = envStore[componentName] ?? {};
@@ -866,25 +893,26 @@ component.implement("cloudflare", {
     let scriptFile: string | undefined;
     let scriptFileSha256: string | undefined;
     let scriptContent: string | undefined;
-    let isPlaceholderScript = false;
 
-    // TODO: will declare artifact types later
     if (componentEntries.length > 0) {
       const artifact = componentEntries[0][1].artifact;
 
-      if (artifact.type === "file") {
-        scriptFile = artifact.uri;
-        // Compute SHA-256 of the script file (required by Cloudflare provider when using contentFile)
-        const fileBuffer = readFileSync(scriptFile);
-        scriptFileSha256 = createHash("sha256").update(fileBuffer).digest("hex");
+      if (artifact.type !== DeploymentArtifactType.file) {
+        throw new Error(
+          `serverless-fn(cloudflare): expects a file artifact (bundled Worker script), received "${artifact.type}". ` +
+            `The cloudflare realization deploys a script file, not a container image.`,
+        );
       }
-      // Ignore artifacts of other types (e.g., oci_spec_image) — treat as no artifact passed
+
+      scriptFile = artifactFilePath(artifact.uri);
+      // Cloudflare requires contentSha256 alongside contentFile
+      const fileBuffer = readFileSync(scriptFile);
+      scriptFileSha256 = createHash("sha256").update(fileBuffer).digest("hex");
     }
 
     // If no build artifact provided, use placeholder script
     if (!scriptFile) {
       scriptContent = DEFAULT_WORKER_SCRIPT;
-      isPlaceholderScript = true;
 
       console.warn(
         `No build artifact found for Cloudflare Worker '${scriptName}'. Using placeholder script.`
@@ -1058,16 +1086,22 @@ component.implement("cloudflare", {
   ]),
 
   upsertArtifacts: async ({ buildArtifacts, state, getCredentials }) => {
-    const { readFileSync } = await import("fs");
-
     const componentEntries = Object.entries(buildArtifacts);
     if (componentEntries.length === 0) {
       console.error("No artifacts to deploy");
       return;
     }
 
+    const artifact = componentEntries[0][1].artifact;
+    if (artifact.type !== DeploymentArtifactType.file) {
+      throw new Error(
+        `serverless-fn(cloudflare): expects a file artifact (bundled Worker script), received "${artifact.type}". ` +
+          `The cloudflare realization deploys a script file, not a container image.`,
+      );
+    }
+
     // The artifact URI is a local file path (pre-downloaded by Go CLI from S3)
-    const localFilePath = componentEntries[0][1].artifact.uri;
+    const localFilePath = artifactFilePath(artifact.uri);
     console.error(
       `Deploying artifact: ${localFilePath} to worker: ${state.scriptName}`
     );
