@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { createHash } from "crypto";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync, statSync, mkdtempSync } from "fs";
+import { execFileSync } from "child_process";
+import { join, relative, extname } from "path";
+import { tmpdir } from "os";
 import { fileURLToPath } from "url";
 
 import {
@@ -47,6 +50,215 @@ const DEFAULT_WORKER_SCRIPT = `export default {
 
 function artifactFilePath(uri: string): string {
   return uri.startsWith("file://") ? fileURLToPath(uri) : uri;
+}
+
+// ---- Static-Asset Serving (Workers Static Assets) ----
+
+// The passthrough module every static-site worker runs: all requests resolve
+// against the uploaded asset manifest, with html/not-found handling governed
+// by the assets config replayed from provision-time state.
+const STATIC_SITE_WORKER_SCRIPT = `export default {
+  async fetch(request, env) {
+    return env.ASSETS.fetch(request);
+  },
+};`;
+
+const ASSET_MIME_TYPES: Record<string, string> = {
+  html: "text/html",
+  css: "text/css",
+  js: "text/javascript",
+  mjs: "text/javascript",
+  json: "application/json",
+  xml: "application/xml",
+  txt: "text/plain",
+  md: "text/markdown",
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  ico: "image/x-icon",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  pdf: "application/pdf",
+  wasm: "application/wasm",
+  map: "application/json",
+};
+
+function assetMime(filePath: string): string {
+  const ext = extname(filePath).slice(1).toLowerCase();
+  return ASSET_MIME_TYPES[ext] ?? "application/octet-stream";
+}
+
+function walkFiles(root: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(root)) {
+    const full = join(root, entry);
+    if (statSync(full).isDirectory()) out.push(...walkFiles(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+// Manifest hash per the documented direct-upload contract:
+// sha256 over base64(content) + extension (no leading dot), first 32 hex chars.
+function assetManifestHash(content: Buffer, filePath: string): string {
+  const ext = extname(filePath).slice(1);
+  return createHash("sha256")
+    .update(content.toString("base64") + ext)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+interface StaticAssetsDeployArgs {
+  accountId: string;
+  scriptName: string;
+  apiToken: string;
+  distDir: string;
+  scriptSettings: {
+    compatibility_date: string;
+    compatibility_flags: string[];
+    bindings: Record<string, unknown>[];
+    assets?: { html_handling?: string; not_found_handling?: string };
+  };
+}
+
+// Full Workers Static Assets flow: manifest session -> bucketed base64
+// uploads -> completion JWT -> script upload binding the asset manifest and
+// the passthrough module. Mirrors the script-mode deploy's out-of-state
+// contract: provision declares routing and settings, deploy carries content.
+async function deployStaticAssets({
+  accountId,
+  scriptName,
+  apiToken,
+  distDir,
+  scriptSettings,
+}: StaticAssetsDeployArgs): Promise<void> {
+  const files = walkFiles(distDir);
+  const byHash = new Map<string, { path: string; content: Buffer }>();
+  const manifest: Record<string, { hash: string; size: number }> = {};
+
+  for (const file of files) {
+    const content = readFileSync(file);
+    const hash = assetManifestHash(content, file);
+    const key = "/" + relative(distDir, file).split("\\").join("/");
+    manifest[key] = { hash, size: content.length };
+    byHash.set(hash, { path: file, content });
+  }
+
+  console.error(
+    `static-assets: ${files.length} files in manifest for worker '${scriptName}'`,
+  );
+
+  const sessionResponse = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}/assets-upload-session`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ manifest }),
+    },
+  );
+  if (!sessionResponse.ok) {
+    throw new Error(
+      `assets-upload-session failed (${sessionResponse.status}): ${await sessionResponse.text()}`,
+    );
+  }
+  const session = (await sessionResponse.json()) as {
+    result: { jwt: string; buckets?: string[][] };
+  };
+
+  let completionJwt = session.result.jwt;
+  const buckets = session.result.buckets ?? [];
+
+  for (const bucket of buckets) {
+    const form = new FormData();
+    for (const hash of bucket) {
+      const entry = byHash.get(hash);
+      if (!entry) throw new Error(`asset bucket names unknown hash ${hash}`);
+      form.append(
+        hash,
+        new Blob([entry.content.toString("base64")], {
+          type: assetMime(entry.path),
+        }),
+        hash,
+      );
+    }
+    const uploadResponse = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/assets/upload?base64=true`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.result.jwt}` },
+        body: form,
+      },
+    );
+    if (!uploadResponse.ok) {
+      throw new Error(
+        `asset upload failed (${uploadResponse.status}): ${await uploadResponse.text()}`,
+      );
+    }
+    const uploadResult = (await uploadResponse.json()) as {
+      result?: { jwt?: string };
+    };
+    if (uploadResult.result?.jwt) completionJwt = uploadResult.result.jwt;
+  }
+
+  const metadata = JSON.stringify({
+    main_module: "index.js",
+    compatibility_date: scriptSettings.compatibility_date,
+    compatibility_flags: scriptSettings.compatibility_flags,
+    bindings: [
+      ...scriptSettings.bindings,
+      { type: "assets", name: "ASSETS" },
+    ],
+    assets: {
+      jwt: completionJwt,
+      config: {
+        html_handling: scriptSettings.assets?.html_handling ?? "auto-trailing-slash",
+        not_found_handling: scriptSettings.assets?.not_found_handling ?? "404-page",
+      },
+    },
+  });
+
+  const scriptForm = new FormData();
+  scriptForm.append(
+    "metadata",
+    new Blob([metadata], { type: "application/json" }),
+  );
+  scriptForm.append(
+    "index.js",
+    new Blob([STATIC_SITE_WORKER_SCRIPT], {
+      type: "application/javascript+module",
+    }),
+    "index.js",
+  );
+
+  const putResponse = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}`,
+    {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${apiToken}` },
+      body: scriptForm,
+    },
+  );
+  if (!putResponse.ok) {
+    throw new Error(
+      `worker script upload with assets failed (${putResponse.status}): ${await putResponse.text()}`,
+    );
+  }
+
+  console.error(
+    `static-assets: worker '${scriptName}' now serves ${files.length} assets`,
+  );
 }
 
 // ---- Zod Enums for Config Options ----
@@ -280,6 +492,23 @@ const component = new InfraComponent({
     cfBindings: CloudflareBindingsSchema.optional().describe(
       "Cloudflare Worker bindings (R2, KV, D1, Queues, Services)"
     ),
+    assetMode: z
+      .enum(["script", "static-site"])
+      .default("script")
+      .optional()
+      .describe(
+        "script: deploy artifact is a bundled Worker module. static-site: deploy artifact is a tar.gz of a built static site served via Workers Static Assets"
+      ),
+    assetsConfig: z
+      .object({
+        htmlHandling: z
+          .enum(["auto-trailing-slash", "force-trailing-slash", "drop-trailing-slash", "none"])
+          .default("auto-trailing-slash"),
+        notFoundHandling: z
+          .enum(["none", "404-page", "single-page-application"])
+          .default("404-page"),
+      })
+      .optional(),
   }),
   appComponentTypes: {
     "http-service": z.object({
@@ -852,6 +1081,12 @@ component.implement("cloudflare", {
         compatibility_date: z.string(),
         compatibility_flags: z.array(z.string()),
         bindings: z.array(z.record(z.string(), z.any())),
+        assets: z
+          .object({
+            html_handling: z.string(),
+            not_found_handling: z.string(),
+          })
+          .optional(),
       })
       .optional(),
     allocations: z.record(z.string(), z.object({
@@ -880,7 +1115,10 @@ component.implement("cloudflare", {
       cfObservability,
       logpush,
       cfBindings,
+      assetMode,
+      assetsConfig,
     } = inputs;
+    const isStaticSite = assetMode === "static-site";
 
     if (!accountId) {
       throw new Error("accountId is required for Cloudflare provider");
@@ -901,7 +1139,7 @@ component.implement("cloudflare", {
     let scriptFileSha256: string | undefined;
     let scriptContent: string | undefined;
 
-    if (componentEntries.length > 0) {
+    if (componentEntries.length > 0 && !isStaticSite) {
       const artifact = componentEntries[0][1].artifact;
 
       if (artifact.type !== DeploymentArtifactType.file) {
@@ -917,13 +1155,16 @@ component.implement("cloudflare", {
       scriptFileSha256 = createHash("sha256").update(fileBuffer).digest("hex");
     }
 
-    // If no build artifact provided, use placeholder script
+    // If no build artifact provided (or the artifact is a static-site bundle
+    // consumed only at deploy time), use placeholder script
     if (!scriptFile) {
       scriptContent = DEFAULT_WORKER_SCRIPT;
 
-      console.warn(
-        `No build artifact found for Cloudflare Worker '${scriptName}'. Using placeholder script.`
-      );
+      if (!isStaticSite) {
+        console.warn(
+          `No build artifact found for Cloudflare Worker '${scriptName}'. Using placeholder script.`
+        );
+      }
     }
 
     // Build all bindings
@@ -974,6 +1215,14 @@ component.implement("cloudflare", {
     state.scriptSettings = {
       compatibility_date: compatibilityDate || "2024-01-01",
       compatibility_flags: compatibilityFlags || ["nodejs_compat"],
+      ...(isStaticSite
+        ? {
+            assets: {
+              html_handling: assetsConfig?.htmlHandling ?? "auto-trailing-slash",
+              not_found_handling: assetsConfig?.notFoundHandling ?? "404-page",
+            },
+          }
+        : {}),
       bindings: [
         ...environmentVariables.map((env) => ({
           type: "plain_text",
@@ -1189,9 +1438,6 @@ component.implement("cloudflare", {
       `Deploying artifact: ${localFilePath} to worker: ${state.scriptName}`
     );
 
-    // Read the bundled JS content from the local file
-    const scriptContent = readFileSync(localFilePath, "utf-8");
-
     const credentials = getCredentials();
     const apiToken = credentials.CLOUDFLARE_API_TOKEN;
     const { accountId, scriptName } = state;
@@ -1203,6 +1449,24 @@ component.implement("cloudflare", {
           `are carried into deploys; uploading without them would strip the live worker's settings.`,
       );
     }
+
+    // Static-site mode: the artifact is a tar.gz of a built site. Extract it
+    // and run the Workers Static Assets flow instead of a module upload.
+    if (state.scriptSettings.assets) {
+      const distDir = mkdtempSync(join(tmpdir(), "sdlc-static-site-"));
+      execFileSync("tar", ["-xzf", localFilePath, "-C", distDir]);
+      await deployStaticAssets({
+        accountId,
+        scriptName,
+        apiToken,
+        distDir,
+        scriptSettings: state.scriptSettings,
+      });
+      return;
+    }
+
+    // Read the bundled JS content from the local file
+    const scriptContent = readFileSync(localFilePath, "utf-8");
 
     // Upload the script to Cloudflare Workers via the API (out-of-state update).
     // This keeps bundled JS code out of Pulumi state.
