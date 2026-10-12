@@ -125,6 +125,22 @@ describe("sandbox-host realization", () => {
     expect(groupAlive(first)).toBe(false);
   }, SLOW);
 
+  test("retires a surviving group member when the recorded leader has died", async () => {
+    const { default: host } = await loadSandboxHost();
+    const component = componentName();
+    const port = await freePort();
+    const { binding } = workspace(component);
+    const deploy = host.providers["e2b-local"]!.upsertArtifacts!;
+    await deploy(deployCtx(component, `file://${binding}`, port, "r1"));
+    const leader = await custodyPid(component);
+    process.kill(leader, "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(groupAlive(leader)).toBe(true);
+    await deploy(deployCtx(component, `file://${binding}`, port, "r2"));
+    expect(groupAlive(leader)).toBe(false);
+    expect(await custodyPid(component)).not.toBe(leader);
+  }, SLOW);
+
   test("refuses a binding minted in another sandbox", async () => {
     const { default: host } = await loadSandboxHost();
     const component = componentName();

@@ -250,9 +250,10 @@ async function realize(input: {
   };
   const identity = launchIdentity(releaseIdentity, command, environment);
   const predecessor = Number(readCustody(component, PID_FILE));
-  const standing = Number.isInteger(predecessor) && predecessor > 0 && alive(predecessor);
+  const recorded = Number.isInteger(predecessor) && predecessor > 0;
+  const standing = recorded && alive(predecessor);
   if (!standing || readCustody(component, LAUNCH_FILE) !== identity) {
-    if (standing) await retire(predecessor);
+    if (recorded) await retire(predecessor);
     fs.rmSync(path.join(dir, RECORD_FILE), { force: true });
     if (await listening(port)) throw new Error(`${Refusal.portOccupied}: ${component}: ${port}`);
     const pid = launch(component, command, environment, binding.workspace_root);
