@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "crypto";
-import { readFileSync, readdirSync, statSync, mkdtempSync } from "fs";
+import { readFileSync, readdirSync, statSync, mkdtempSync, existsSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, relative, extname } from "path";
 import { tmpdir } from "os";
@@ -52,11 +52,36 @@ function artifactFilePath(uri: string): string {
   return uri.startsWith("file://") ? fileURLToPath(uri) : uri;
 }
 
-// ---- Static-Asset Serving (Workers Static Assets) ----
+// ---- Workers upload (script, static-site, worker-assets) ----
 
-// The passthrough module every static-site worker runs: all requests resolve
-// against the uploaded asset manifest, with html/not-found handling governed
-// by the assets config replayed from provision-time state.
+const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
+const ASSETS_BINDING_NAME = "ASSETS";
+const WORKER_MAIN_MODULE = "index.js";
+const WORKER_ASSETS_WORKER_DIR = "worker";
+const WORKER_ASSETS_ASSETS_DIR = "assets";
+const WORKER_ASSETS_COMPATIBILITY_FLOOR = "2024-09-23";
+const NODEJS_COMPAT_FLAG = "nodejs_compat";
+const DEFAULT_COMPATIBILITY_DATE = "2024-01-01";
+const DEFAULT_HTML_HANDLING = "auto-trailing-slash";
+const STATIC_SITE_NOT_FOUND_HANDLING = "404-page";
+const WORKER_ASSETS_NOT_FOUND_HANDLING = "none";
+const ESM_MODULE_CONTENT_TYPE = "application/javascript+module";
+const SECRET_TEXT_BINDING = "secret_text";
+
+const ASSET_MODES = ["script", "static-site", "worker-assets"] as const;
+type AssetMode = (typeof ASSET_MODES)[number];
+
+const WORKER_MODULE_CONTENT_TYPES: Record<string, string> = {
+  js: ESM_MODULE_CONTENT_TYPE,
+  mjs: ESM_MODULE_CONTENT_TYPE,
+  cjs: "application/javascript",
+  wasm: "application/wasm",
+  map: "application/source-map",
+  txt: "text/plain",
+  html: "text/plain",
+  sql: "text/plain",
+};
+
 const STATIC_SITE_WORKER_SCRIPT = `export default {
   async fetch(request, env) {
     return env.ASSETS.fetch(request);
@@ -117,30 +142,88 @@ function assetManifestHash(content: Buffer, filePath: string): string {
     .slice(0, 32);
 }
 
-interface StaticAssetsDeployArgs {
+interface ScriptSettings {
+  compatibility_date: string;
+  compatibility_flags: string[];
+  bindings: Record<string, unknown>[];
+  assets?: { html_handling?: string; not_found_handling?: string };
+  secret_refs?: { name: string; secret_name: string }[];
+}
+
+interface WorkerModule {
+  name: string;
+  content: Buffer | string;
+  contentType: string;
+}
+
+interface DeployArgs {
   accountId: string;
   scriptName: string;
   apiToken: string;
-  distDir: string;
-  scriptSettings: {
-    compatibility_date: string;
-    compatibility_flags: string[];
-    bindings: Record<string, unknown>[];
-    assets?: { html_handling?: string; not_found_handling?: string };
+  artifactPath: string;
+  settings: ScriptSettings;
+  bindings: Record<string, unknown>[];
+}
+
+function workerModuleContentType(filePath: string): string {
+  const ext = extname(filePath).slice(1).toLowerCase();
+  return WORKER_MODULE_CONTENT_TYPES[ext] ?? "application/octet-stream";
+}
+
+function requireSecretValue(
+  credentials: Record<string, unknown>,
+  name: string,
+  secretName: string,
+): string {
+  const value = credentials[secretName];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `serverless-fn(cloudflare): secret '${name}' names credential key '${secretName}', which the bound credential does not carry`,
+    );
+  }
+  return value;
+}
+
+function deployBindings(
+  settings: ScriptSettings,
+  credentials: Record<string, unknown>,
+): Record<string, unknown>[] {
+  return [
+    ...settings.bindings,
+    ...(settings.secret_refs ?? []).map((ref) => ({
+      type: SECRET_TEXT_BINDING,
+      name: ref.name,
+      text: requireSecretValue(credentials, ref.name, ref.secret_name),
+    })),
+  ];
+}
+
+function extractArtifact(artifactPath: string, prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  execFileSync("tar", ["-xzf", artifactPath, "-C", dir]);
+  return dir;
+}
+
+function assetsMetadata(
+  settings: ScriptSettings,
+  jwt: string,
+  notFoundDefault: string,
+): { jwt: string; config: { html_handling: string; not_found_handling: string } } {
+  return {
+    jwt,
+    config: {
+      html_handling: settings.assets?.html_handling ?? DEFAULT_HTML_HANDLING,
+      not_found_handling: settings.assets?.not_found_handling ?? notFoundDefault,
+    },
   };
 }
 
-// Full Workers Static Assets flow: manifest session -> bucketed base64
-// uploads -> completion JWT -> script upload binding the asset manifest and
-// the passthrough module. Mirrors the script-mode deploy's out-of-state
-// contract: provision declares routing and settings, deploy carries content.
-async function deployStaticAssets({
-  accountId,
-  scriptName,
-  apiToken,
-  distDir,
-  scriptSettings,
-}: StaticAssetsDeployArgs): Promise<void> {
+async function uploadAssetManifest(
+  accountId: string,
+  scriptName: string,
+  apiToken: string,
+  distDir: string,
+): Promise<string> {
   const files = walkFiles(distDir);
   const byHash = new Map<string, { path: string; content: Buffer }>();
   const manifest: Record<string, { hash: string; size: number }> = {};
@@ -158,7 +241,7 @@ async function deployStaticAssets({
   );
 
   const sessionResponse = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}/assets-upload-session`,
+    `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/scripts/${scriptName}/assets-upload-session`,
     {
       method: "POST",
       headers: {
@@ -194,7 +277,7 @@ async function deployStaticAssets({
       );
     }
     const uploadResponse = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/assets/upload?base64=true`,
+      `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/assets/upload?base64=true`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${session.result.jwt}` },
@@ -212,52 +295,132 @@ async function deployStaticAssets({
     if (uploadResult.result?.jwt) completionJwt = uploadResult.result.jwt;
   }
 
-  const metadata = JSON.stringify({
-    main_module: "index.js",
-    compatibility_date: scriptSettings.compatibility_date,
-    compatibility_flags: scriptSettings.compatibility_flags,
-    bindings: [
-      ...scriptSettings.bindings,
-      { type: "assets", name: "ASSETS" },
-    ],
-    assets: {
-      jwt: completionJwt,
-      config: {
-        html_handling: scriptSettings.assets?.html_handling ?? "auto-trailing-slash",
-        not_found_handling: scriptSettings.assets?.not_found_handling ?? "404-page",
-      },
-    },
-  });
+  return completionJwt;
+}
 
-  const scriptForm = new FormData();
-  scriptForm.append(
+async function putWorkerScript(
+  accountId: string,
+  scriptName: string,
+  apiToken: string,
+  metadata: Record<string, unknown>,
+  modules: WorkerModule[],
+): Promise<void> {
+  const form = new FormData();
+  form.append(
     "metadata",
-    new Blob([metadata], { type: "application/json" }),
+    new Blob([JSON.stringify(metadata)], { type: "application/json" }),
   );
-  scriptForm.append(
-    "index.js",
-    new Blob([STATIC_SITE_WORKER_SCRIPT], {
-      type: "application/javascript+module",
-    }),
-    "index.js",
-  );
-
-  const putResponse = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}`,
+  for (const module of modules) {
+    form.append(
+      module.name,
+      new Blob([module.content], { type: module.contentType }),
+      module.name,
+    );
+  }
+  const response = await fetch(
+    `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/scripts/${scriptName}`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${apiToken}` },
-      body: scriptForm,
+      body: form,
     },
   );
-  if (!putResponse.ok) {
+  if (!response.ok) {
     throw new Error(
-      `worker script upload with assets failed (${putResponse.status}): ${await putResponse.text()}`,
+      `serverless-fn(cloudflare): worker script upload failed (${response.status}): ${await response.text()}`,
     );
   }
+}
 
+function baseMetadata(settings: ScriptSettings): Record<string, unknown> {
+  return {
+    main_module: WORKER_MAIN_MODULE,
+    compatibility_date: settings.compatibility_date,
+    compatibility_flags: settings.compatibility_flags,
+  };
+}
+
+async function deployScript(args: DeployArgs): Promise<void> {
+  await putWorkerScript(
+    args.accountId,
+    args.scriptName,
+    args.apiToken,
+    { ...baseMetadata(args.settings), bindings: args.bindings },
+    [
+      {
+        name: WORKER_MAIN_MODULE,
+        content: readFileSync(args.artifactPath, "utf-8"),
+        contentType: ESM_MODULE_CONTENT_TYPE,
+      },
+    ],
+  );
+}
+
+async function deployStaticSite(args: DeployArgs): Promise<void> {
+  const distDir = extractArtifact(args.artifactPath, "sdlc-static-site-");
+  const jwt = await uploadAssetManifest(
+    args.accountId,
+    args.scriptName,
+    args.apiToken,
+    distDir,
+  );
+  await putWorkerScript(
+    args.accountId,
+    args.scriptName,
+    args.apiToken,
+    {
+      ...baseMetadata(args.settings),
+      bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
+      assets: assetsMetadata(args.settings, jwt, STATIC_SITE_NOT_FOUND_HANDLING),
+    },
+    [
+      {
+        name: WORKER_MAIN_MODULE,
+        content: STATIC_SITE_WORKER_SCRIPT,
+        contentType: ESM_MODULE_CONTENT_TYPE,
+      },
+    ],
+  );
+}
+
+async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
+  const root = extractArtifact(args.artifactPath, "sdlc-worker-assets-");
+  const workerDir = join(root, WORKER_ASSETS_WORKER_DIR);
+  const assetsDir = join(root, WORKER_ASSETS_ASSETS_DIR);
+  if (!existsSync(join(workerDir, WORKER_MAIN_MODULE))) {
+    throw new Error(
+      `serverless-fn(cloudflare): worker-assets artifact carries no ${WORKER_ASSETS_WORKER_DIR}/${WORKER_MAIN_MODULE} entry module`,
+    );
+  }
+  if (!existsSync(assetsDir) || !statSync(assetsDir).isDirectory()) {
+    throw new Error(
+      `serverless-fn(cloudflare): worker-assets artifact carries no ${WORKER_ASSETS_ASSETS_DIR}/ directory`,
+    );
+  }
+  const modules: WorkerModule[] = walkFiles(workerDir).map((file) => ({
+    name: relative(workerDir, file).split("\\").join("/"),
+    content: readFileSync(file),
+    contentType: workerModuleContentType(file),
+  }));
+  const jwt = await uploadAssetManifest(
+    args.accountId,
+    args.scriptName,
+    args.apiToken,
+    assetsDir,
+  );
+  await putWorkerScript(
+    args.accountId,
+    args.scriptName,
+    args.apiToken,
+    {
+      ...baseMetadata(args.settings),
+      bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
+      assets: assetsMetadata(args.settings, jwt, WORKER_ASSETS_NOT_FOUND_HANDLING),
+    },
+    modules,
+  );
   console.error(
-    `static-assets: worker '${scriptName}' now serves ${files.length} assets`,
+    `worker-assets: worker '${args.scriptName}' deployed with ${modules.length} modules`,
   );
 }
 
@@ -493,11 +656,11 @@ const component = new InfraComponent({
       "Cloudflare Worker bindings (R2, KV, D1, Queues, Services)"
     ),
     assetMode: z
-      .enum(["script", "static-site"])
+      .enum(ASSET_MODES)
       .default("script")
       .optional()
       .describe(
-        "script: deploy artifact is a bundled Worker module. static-site: deploy artifact is a tar.gz of a built static site served via Workers Static Assets"
+        "script: deploy artifact is a bundled Worker module. static-site: deploy artifact is a tar.gz of a built static site served via Workers Static Assets. worker-assets: deploy artifact is a tar.gz with worker/ (entry worker/index.js plus modules) and assets/ (served via the ASSETS binding)"
       ),
     assetsConfig: z
       .object({
@@ -1076,6 +1239,7 @@ component.implement("cloudflare", {
     scriptName: z.string(),
     accountId: z.string(),
     workerUri: z.string(),
+    assetMode: z.enum(ASSET_MODES).optional(),
     scriptSettings: z
       .object({
         compatibility_date: z.string(),
@@ -1086,6 +1250,9 @@ component.implement("cloudflare", {
             html_handling: z.string(),
             not_found_handling: z.string(),
           })
+          .optional(),
+        secret_refs: z
+          .array(z.object({ name: z.string(), secret_name: z.string() }))
           .optional(),
       })
       .optional(),
@@ -1117,8 +1284,26 @@ component.implement("cloudflare", {
       cfBindings,
       assetMode,
       assetsConfig,
+      secretEnvironmentVariables,
     } = inputs;
-    const isStaticSite = assetMode === "static-site";
+    const mode: AssetMode = assetMode ?? "script";
+    const deploysContentAtRelease = mode !== "script";
+    const isWorkerAssets = mode === "worker-assets";
+    const credentials = getCredentials();
+    const secretRefs = (secretEnvironmentVariables ?? []).map((secret) => ({
+      name: secret.name,
+      secret_name: secret.secretName,
+    }));
+    const declaredDate = compatibilityDate || DEFAULT_COMPATIBILITY_DATE;
+    const effectiveDate =
+      isWorkerAssets && declaredDate < WORKER_ASSETS_COMPATIBILITY_FLOOR
+        ? WORKER_ASSETS_COMPATIBILITY_FLOOR
+        : declaredDate;
+    const declaredFlags = compatibilityFlags || [NODEJS_COMPAT_FLAG];
+    const effectiveFlags =
+      isWorkerAssets && !declaredFlags.includes(NODEJS_COMPAT_FLAG)
+        ? [...declaredFlags, NODEJS_COMPAT_FLAG]
+        : declaredFlags;
 
     if (!accountId) {
       throw new Error("accountId is required for Cloudflare provider");
@@ -1128,18 +1313,16 @@ component.implement("cloudflare", {
       provider: cloudflareProviderFromCredentials($`cf-provider`, getCredentials),
     };
 
-    // Generate script name
     const scriptName = $`worker`;
     state.scriptName = scriptName;
     state.accountId = accountId;
 
-    // Get script content from buildArtifacts (file type, pre-downloaded to local path by Go CLI)
     const componentEntries = Object.entries(buildArtifacts);
     let scriptFile: string | undefined;
     let scriptFileSha256: string | undefined;
     let scriptContent: string | undefined;
 
-    if (componentEntries.length > 0 && !isStaticSite) {
+    if (componentEntries.length > 0 && !deploysContentAtRelease) {
       const artifact = componentEntries[0][1].artifact;
 
       if (artifact.type !== DeploymentArtifactType.file) {
@@ -1150,79 +1333,76 @@ component.implement("cloudflare", {
       }
 
       scriptFile = artifactFilePath(artifact.uri);
-      // Cloudflare requires contentSha256 alongside contentFile
       const fileBuffer = readFileSync(scriptFile);
       scriptFileSha256 = createHash("sha256").update(fileBuffer).digest("hex");
     }
 
-    // If no build artifact provided (or the artifact is a static-site bundle
-    // consumed only at deploy time), use placeholder script
     if (!scriptFile) {
       scriptContent = DEFAULT_WORKER_SCRIPT;
 
-      if (!isStaticSite) {
+      if (!deploysContentAtRelease) {
         console.warn(
           `No build artifact found for Cloudflare Worker '${scriptName}'. Using placeholder script.`
         );
       }
     }
 
-    // Build all bindings
     const bindings: cloudflare.types.input.WorkersScriptBinding[] = [
-      // Plain text environment variables
       ...environmentVariables.map((env) => ({
         name: env.name,
         text: env.value,
         type: "plain_text" as const,
       })),
-      // R2 bucket bindings
       ...(cfBindings?.r2 || []).map((binding) => ({
         name: binding.name,
         bucketName: binding.bucketName,
         type: "r2_bucket" as const,
       })),
-      // Worker service bindings
       ...(cfBindings?.services || []).map((binding) => ({
         name: binding.name,
         service: binding.service,
         environment: binding.environment,
         type: "service" as const,
       })),
-      // KV namespace bindings
       ...(cfBindings?.kv || []).map((binding) => ({
         name: binding.name,
         namespaceId: binding.namespaceId,
         type: "kv_namespace" as const,
       })),
-      // D1 database bindings
       ...(cfBindings?.d1 || []).map((binding) => ({
         name: binding.name,
         databaseId: binding.databaseId,
         type: "d1" as const,
       })),
-      // Queue bindings
       ...(cfBindings?.queues || []).map((binding) => ({
         name: binding.name,
         queueName: binding.queueName,
         type: "queue" as const,
       })),
+      ...secretRefs.map((ref) => ({
+        name: ref.name,
+        text: pulumi.secret(requireSecretValue(credentials, ref.name, ref.secret_name)),
+        type: SECRET_TEXT_BINDING as "secret_text",
+      })),
     ];
 
-    // The raw script-upload API used at deploy time (upsertArtifacts) replaces
-    // the worker's full settings, so the same metadata the resource declares
-    // here must be replayed there; persisted in the API's own wire shape
-    // (snake_case fields, d1 bindings keyed by `id`).
+    state.assetMode = mode;
     state.scriptSettings = {
-      compatibility_date: compatibilityDate || "2024-01-01",
-      compatibility_flags: compatibilityFlags || ["nodejs_compat"],
-      ...(isStaticSite
+      compatibility_date: effectiveDate,
+      compatibility_flags: effectiveFlags,
+      ...(deploysContentAtRelease
         ? {
             assets: {
-              html_handling: assetsConfig?.htmlHandling ?? "auto-trailing-slash",
-              not_found_handling: assetsConfig?.notFoundHandling ?? "404-page",
+              html_handling: assetsConfig?.htmlHandling ?? DEFAULT_HTML_HANDLING,
+              not_found_handling:
+                assetsConfig?.notFoundHandling ??
+                (isWorkerAssets
+                  ? WORKER_ASSETS_NOT_FOUND_HANDLING
+                  : STATIC_SITE_NOT_FOUND_HANDLING),
             },
           }
         : {}),
+      ...(secretRefs.length > 0 ? { secret_refs: secretRefs } : {}),
       bindings: [
         ...environmentVariables.map((env) => ({
           type: "plain_text",
@@ -1258,14 +1438,13 @@ component.implement("cloudflare", {
       ],
     };
 
-    // Create Workers Script
     const worker = new cloudflare.WorkersScript($`script`, {
       accountId: accountId,
       scriptName: scriptName,
       ...(scriptFile ? { contentFile: scriptFile, contentSha256: scriptFileSha256 } : { content: scriptContent }),
-      mainModule: "index.js",
-      compatibilityDate: compatibilityDate || "2024-01-01",
-      compatibilityFlags: compatibilityFlags || ["nodejs_compat"],
+      mainModule: WORKER_MAIN_MODULE,
+      compatibilityDate: effectiveDate,
+      compatibilityFlags: effectiveFlags,
       bindings: bindings.length > 0 ? bindings : undefined,
       limits: cfLimits
         ? {
@@ -1432,15 +1611,10 @@ component.implement("cloudflare", {
       );
     }
 
-    // The artifact URI is a local file path (pre-downloaded by Go CLI from S3)
     const localFilePath = artifactFilePath(artifact.uri);
     console.error(
       `Deploying artifact: ${localFilePath} to worker: ${state.scriptName}`
     );
-
-    const credentials = getCredentials();
-    const apiToken = credentials.CLOUDFLARE_API_TOKEN;
-    const { accountId, scriptName } = state;
 
     if (!state.scriptSettings) {
       throw new Error(
@@ -1450,64 +1624,25 @@ component.implement("cloudflare", {
       );
     }
 
-    // Static-site mode: the artifact is a tar.gz of a built site. Extract it
-    // and run the Workers Static Assets flow instead of a module upload.
-    if (state.scriptSettings.assets) {
-      const distDir = mkdtempSync(join(tmpdir(), "sdlc-static-site-"));
-      execFileSync("tar", ["-xzf", localFilePath, "-C", distDir]);
-      await deployStaticAssets({
-        accountId,
-        scriptName,
-        apiToken,
-        distDir,
-        scriptSettings: state.scriptSettings,
-      });
-      return;
-    }
+    const credentials = getCredentials();
+    const settings = state.scriptSettings as ScriptSettings;
+    const args: DeployArgs = {
+      accountId: state.accountId as string,
+      scriptName: state.scriptName as string,
+      apiToken: credentials.CLOUDFLARE_API_TOKEN as string,
+      artifactPath: localFilePath,
+      settings,
+      bindings: deployBindings(settings, credentials),
+    };
+    const mode: AssetMode =
+      (state.assetMode as AssetMode | undefined) ??
+      (settings.assets ? "static-site" : "script");
 
-    // Read the bundled JS content from the local file
-    const scriptContent = readFileSync(localFilePath, "utf-8");
+    if (mode === "worker-assets") await deployWorkerWithAssets(args);
+    else if (mode === "static-site") await deployStaticSite(args);
+    else await deployScript(args);
 
-    // Upload the script to Cloudflare Workers via the API (out-of-state update).
-    // This keeps bundled JS code out of Pulumi state.
-    // Uses multipart form upload: metadata part + ES module script part. The
-    // API replaces the worker's full settings on upload, so the provision-time
-    // settings are replayed alongside the new module.
-    const metadata = JSON.stringify({
-      main_module: "index.js",
-      compatibility_date: state.scriptSettings.compatibility_date,
-      compatibility_flags: state.scriptSettings.compatibility_flags,
-      bindings: state.scriptSettings.bindings,
-    });
-
-    const formData = new FormData();
-    formData.append(
-      "metadata",
-      new Blob([metadata], { type: "application/json" })
-    );
-    formData.append(
-      "index.js",
-      new Blob([scriptContent], { type: "application/javascript+module" }),
-      "index.js"
-    );
-
-    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}`;
-    const response = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-      },
-      body: formData,
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(
-        `Cloudflare Workers API error (${response.status}): ${body}`
-      );
-    }
-
-    console.error(`Successfully deployed worker script: ${scriptName}`);
+    console.error(`Successfully deployed worker script: ${args.scriptName} (${mode})`);
   },
 });
 

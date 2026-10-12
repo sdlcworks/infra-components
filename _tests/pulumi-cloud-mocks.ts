@@ -44,6 +44,7 @@ mock.module("@pulumi/pulumi", () => ({
   interpolate: (strings: TemplateStringsArray, ...values: unknown[]) =>
     String.raw({ raw: strings }, ...values),
   all: (arr: unknown[]) => ({ apply: (f: (x: unknown) => unknown) => f(arr) }),
+  secret: (v: unknown) => v,
   Provider: class {},
 }));
 
