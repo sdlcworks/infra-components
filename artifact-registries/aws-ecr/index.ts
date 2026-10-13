@@ -12,7 +12,6 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import {
   ArtifactRegistry,
   DeploymentArtifactType,
-  type CloudCredentialAWS,
 } from "@sdlcworks/components";
 import { z } from "zod";
 
@@ -70,7 +69,10 @@ const StateSchema = z.object({
 
 type AwsEcrConfig = z.infer<typeof ConfigSchema>;
 type AwsEcrState = z.infer<typeof StateSchema>;
-type AwsCredentials = CloudCredentialAWS & {
+type AwsCredentials = {
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
+  AWS_REGION: string;
   AWS_SESSION_TOKEN?: string;
 };
 
@@ -218,6 +220,9 @@ const registry = new ArtifactRegistry({
   acceptedArtifactTypes: [DeploymentArtifactType.oci_spec_image],
   configSchema: ConfigSchema,
   stateSchema: StateSchema,
+});
+
+registry.implement("aws", {
   provision: async ({ config, state, getCredentials }) => {
     const effective = config as unknown as AwsEcrConfig;
     const creds = credentialsFrom(getCredentials);

@@ -31,6 +31,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 | `serverless-fn/` | GCP Cloud Run service + Cloudflare Workers |
 | `cloudjob/` | GCP Cloud Run Job |
 | `cloudflare-d1/` | Cloudflare D1 database |
+| `sandbox-host/` | e2b sandbox serving host: runs released workspace processes inside the developer's sandbox and records their public endpoints |
 
 ### Artifact Registries
 

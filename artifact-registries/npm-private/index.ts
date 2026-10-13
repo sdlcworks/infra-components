@@ -18,6 +18,9 @@ const registry = new ArtifactRegistry({
     project: z.string().optional(),
     scope: z.string(),
   }),
+});
+
+registry.implement("npm", {
   provision: async ({ config, state }) => {
     state.feed = config.feed;
     state.project = config.project;

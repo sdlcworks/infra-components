@@ -6,6 +6,7 @@ import {
 } from "@sdlcworks/components";
 
 import * as cloudflare from "@pulumi/cloudflare";
+import { cloudflareProviderFromCredentials } from "../_internal/cloudflare-provider";
 import * as pulumi from "@pulumi/pulumi";
 
 import { D1DatabaseCI } from "../_internal/interfaces";
@@ -67,15 +68,14 @@ component.implement("cloudflare", {
     $,
     inputs,
     state,
-    cloudflare: cfProvider,
+    getCredentials,
   }) => {
     const { accountId, primaryLocationHint, jurisdiction, readReplication } =
       inputs;
 
-    // Default opts for all Cloudflare resources — uses the explicit provider
-    const cfOpts: pulumi.CustomResourceOptions = cfProvider
-      ? { provider: cfProvider }
-      : {};
+    const cfOpts: pulumi.CustomResourceOptions = {
+      provider: cloudflareProviderFromCredentials($`cf-provider`, getCredentials),
+    };
 
     const databaseName = $`database`;
 

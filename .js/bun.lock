@@ -1,6 +1,6 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "sdlcworks-infra-components",
@@ -12,7 +12,7 @@
         "@aws-sdk/client-sts": "^3.978.0",
         "@pulumi/aws": "^7.14.0",
         "@pulumi/awsx": "^3.1.0",
-        "@pulumi/cloudflare": "^6.13.0",
+        "@pulumi/cloudflare": "6.19.0",
         "@pulumi/command": "^1.2.1",
         "@pulumi/gcp": "^9.6.0",
         "@pulumi/hcloud": "^1.38.0",
@@ -20,7 +20,7 @@
         "@pulumi/mongodbatlas": "^4.11",
         "@pulumi/pulumi": "3.213.0",
         "@pulumi/tls": "^5.3.0",
-        "@sdlcworks/components": "https://github.com/sdlcworks/public-releases/releases/download/components%2F0.0.72/package.tgz",
+        "@sdlcworks/components": "https://github.com/sdlcworks/public-releases/releases/download/components%2Fcomponents%2F0.0.79+sdlc-release.1789451035/package.tgz",
         "js-yaml": "^4.1.1",
         "zod": "4.1.13",
       },
@@ -163,7 +163,7 @@
 
     "@pulumi/awsx": ["@pulumi/awsx@3.8.0", "", { "dependencies": { "@aws-sdk/client-ecs": "^3.974.0", "@pulumi/aws": "^7.38.0", "@pulumi/docker": "^4.6.0", "@pulumi/docker-build": "^0.0.14", "@pulumi/pulumi": "^3.142.0", "@types/aws-lambda": "^8.10.23", "docker-classic": "npm:@pulumi/docker@3.6.1", "mime": "^2.0.0" } }, "sha512-w8yGnRnIDbftDzm0yanK2TNEr9xu3cmSTtAhOXWD523woK7Ae3gKErxiPVTnqyiez3PeRvE8IhMM0pAtB0Sz1Q=="],
 
-    "@pulumi/cloudflare": ["@pulumi/cloudflare@6.18.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-L49neVgL7crzUKr+lfNYAmooqnmSGPg6TN8+PXouxyjojjwMdRM3WLNPkUxYu3vqr0WhD86afqdujee1Kz4R9w=="],
+    "@pulumi/cloudflare": ["@pulumi/cloudflare@6.19.0", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-AP76ceRwCIws362nm7UpfvDvzI4zPaGThli0i3qsKqjektk1qNapyflA9g0LvpI2e6VEWAdTbkIK7WSucg00Sg=="],
 
     "@pulumi/command": ["@pulumi/command@1.2.1", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-mutNDIUYP67yCBYOVIidQyxuTwZDY9v/sx9EGbgIv4PXfyfolOKGgGLeoHEbI1lxRwaw2wbTZ3VNIynDnA5VKA=="],
 
@@ -183,7 +183,7 @@
 
     "@pulumi/tls": ["@pulumi/tls@5.5.1", "", { "dependencies": { "@pulumi/pulumi": "^3.142.0" } }, "sha512-xwOtj3Ytb3GyXRaLDQ/Aldtwy3RQvmRi6yvZ0kEl++ldrwlRWWcpYnLYC0sWtlXhEonxdi3bne1Mijk80AKdBw=="],
 
-    "@sdlcworks/components": ["@sdlcworks/components@https://github.com/sdlcworks/public-releases/releases/download/components%2F0.0.72/package.tgz", { "peerDependencies": { "@pulumi/aws": "^7.14.0", "@pulumi/cloudflare": "^6.13.0", "@pulumi/gcp": "^9.6.0", "@pulumi/pulumi": "3.213.0", "typescript": "^5.0.0", "zod": "^4.0.0" }, "optionalPeers": ["@pulumi/aws", "@pulumi/cloudflare", "@pulumi/gcp"] }, "sha512-nwsCEY6dA89a+XnJGN95ZJzXOaIywQHdWNBmMConScbJA+Z4goByoRp8gsn37FFZdc84crwkREFDWUpCcw2Ffw=="],
+    "@sdlcworks/components": ["@sdlcworks/components@https://github.com/sdlcworks/public-releases/releases/download/components%2Fcomponents%2F0.0.79+sdlc-release.1789451035/package.tgz", { "peerDependencies": { "@pulumi/aws": "^7.14.0", "@pulumi/cloudflare": "^6.13.0", "@pulumi/gcp": "^9.6.0", "@pulumi/pulumi": "3.213.0", "typescript": "^5.0.0", "zod": "^4.0.0" }, "optionalPeers": ["@pulumi/aws", "@pulumi/cloudflare", "@pulumi/gcp"] }],
 
     "@sigstore/bundle": ["@sigstore/bundle@2.3.2", "", { "dependencies": { "@sigstore/protobuf-specs": "^0.3.2" } }, "sha512-wueKWDk70QixNLB363yHc2D2ItTgYiMTdPwK8D9dKQMR3ZQ0c35IxP5xnwQ8cNLoCgCRcHf14kE+CLIvNX1zmA=="],
 

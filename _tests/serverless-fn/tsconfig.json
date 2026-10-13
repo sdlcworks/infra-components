@@ -1,0 +1,12 @@
+{
+  "extends": "../../.js/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "types": ["bun"]
+  },
+  "include": [
+    "../../serverless-fn/index.ts",
+    "./*.ts"
+  ]
+}
