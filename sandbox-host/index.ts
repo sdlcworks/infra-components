@@ -60,6 +60,7 @@ const PID_FILE = "pid";
 const LAUNCH_FILE = "launch";
 const RECORD_FILE = "record.json";
 const LOG_FILE = "process.log";
+export const SERVED_FILE = "served";
 const STATE_DIR = "data";
 const INHERITED_ENVIRONMENT = [
   "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ",
@@ -97,15 +98,21 @@ export function servingEndpoint(port: number, sandbox: string, ingressDomain: st
   return `https://${port}-${sandbox}.${ingressDomain}`;
 }
 
-export function restartScript(command: string, policy: RestartPolicy = RESTART_POLICY): string {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function restartScript(command: string, servedMarker: string, policy: RestartPolicy = RESTART_POLICY): string {
+  const served = `[ -e ${shellQuote(servedMarker)} ]`;
   return [
-    `attempt=0; proven=0; delay=${policy.backoffSeconds}`,
-    `while [ "$proven" -eq 1 ] || [ "$attempt" -lt ${policy.budget} ]; do`,
+    `attempt=0; delay=${policy.backoffSeconds}`,
+    `while ${served} || [ "$attempt" -lt ${policy.budget} ]; do`,
     `began=$(date +%s)`,
     `( ${command} )`,
-    `if [ $(( $(date +%s) - began )) -ge ${policy.healthySeconds} ]; then proven=1; attempt=0; delay=${policy.backoffSeconds}; else attempt=$((attempt + 1)); fi`,
+    `if [ $(( $(date +%s) - began )) -ge ${policy.healthySeconds} ]; then delay=${policy.backoffSeconds}; fi`,
+    `if ! ${served}; then attempt=$((attempt + 1)); fi`,
     `sleep "$delay"`,
-    `if [ "$proven" -eq 1 ] && [ "$attempt" -gt 0 ]; then delay=$((delay * 2)); if [ "$delay" -gt ${policy.backoffCeilingSeconds} ]; then delay=${policy.backoffCeilingSeconds}; fi; fi`,
+    `if ${served}; then delay=$((delay * 2)); if [ "$delay" -gt ${policy.backoffCeilingSeconds} ]; then delay=${policy.backoffCeilingSeconds}; fi; fi`,
     `done`,
   ].join("\n");
 }
@@ -228,7 +235,7 @@ function logTail(component: string): string {
 function launch(component: string, command: string, environment: Record<string, string>, cwd: string): number {
   const log = fs.openSync(path.join(custodyDir(component), LOG_FILE), "w");
   try {
-    const child = spawn(SHELL, ["-c", restartScript(command)], { cwd, env: environment, detached: true, stdio: ["ignore", log, log] });
+    const child = spawn(SHELL, ["-c", restartScript(command, path.join(custodyDir(component), SERVED_FILE))], { cwd, env: environment, detached: true, stdio: ["ignore", log, log] });
     child.once("error", () => {});
     if (child.pid === undefined) throw new Error(`${Refusal.startupFailed}: ${component}`);
     child.unref();
@@ -277,12 +284,14 @@ async function realize(input: {
   if (!standing || readCustody(component, LAUNCH_FILE) !== identity) {
     if (recorded) await retire(predecessor);
     fs.rmSync(path.join(dir, RECORD_FILE), { force: true });
+    fs.rmSync(path.join(dir, SERVED_FILE), { force: true });
     if (await listening(port)) throw new Error(`${Refusal.portOccupied}: ${component}: ${port}`);
     const pid = launch(component, command, environment, binding.workspace_root);
     fs.writeFileSync(path.join(dir, PID_FILE), String(pid));
     fs.writeFileSync(path.join(dir, LAUNCH_FILE), identity);
   }
   await awaitStartup(component, Number(readCustody(component, PID_FILE)), port);
+  fs.writeFileSync(path.join(dir, SERVED_FILE), "");
   const record: ServingRecord = {
     release_identity: releaseIdentity,
     environment_identity: sandbox,

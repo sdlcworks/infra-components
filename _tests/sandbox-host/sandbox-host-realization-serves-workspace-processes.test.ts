@@ -161,6 +161,19 @@ describe("sandbox-host realization", () => {
     await expect(host.providers["e2b-local"]!.upsertArtifacts!(deployCtx(component, "s3://bucket/key.json", await freePort(), "r1"))).rejects.toThrow("sandbox-host-artifact-not-local");
   });
 
+  test("marks a launch served only once it is witnessed listening, and starts every new launch unserved", async () => {
+    const { default: host, PROCESS_CUSTODY_ROOT, SERVED_FILE } = await loadSandboxHost();
+    const component = componentName();
+    const port = await freePort();
+    const { binding } = workspace(component);
+    const deploy = host.providers["e2b-local"]!.upsertArtifacts!;
+    const served = path.join(PROCESS_CUSTODY_ROOT, component, SERVED_FILE);
+    await deploy(deployCtx(component, `file://${binding}`, port, "r1"));
+    expect(fs.existsSync(served)).toBe(true);
+    await expect(deploy(deployCtx(component, `file://${binding}`, port, "r2", "echo never-listens; exit 3"))).rejects.toThrow("sandbox-host-startup-failed");
+    expect(fs.existsSync(served)).toBe(false);
+  }, SLOW);
+
   test("names a command that exhausts its restarts without listening", async () => {
     const { default: host } = await loadSandboxHost();
     const component = componentName();

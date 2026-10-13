@@ -43,25 +43,40 @@ async function until(predicate: () => boolean, timeoutMs: number): Promise<boole
   return predicate();
 }
 
-test("a command that never ran healthy stops after its budget", async () => {
+function servedMarker(file: string, served: boolean): string {
+  const marker = path.join(path.dirname(file), "served");
+  if (served) fs.writeFileSync(marker, "");
+  return marker;
+}
+
+const QUICK = { budget: 2, healthySeconds: 1, backoffSeconds: 0, backoffCeilingSeconds: 0 };
+
+test("a command that never served stops after its budget", async () => {
   const { restartScript } = await loadSandboxHost();
   const file = ledger();
   const { exited } = supervise(
-    restartScript(`echo run >> "$RUNS"; exit 3`, { budget: 3, healthySeconds: 5, backoffSeconds: 0, backoffCeilingSeconds: 0 }),
+    restartScript(`echo run >> "$RUNS"; exit 3`, servedMarker(file, false), { budget: 3, healthySeconds: 5, backoffSeconds: 0, backoffCeilingSeconds: 0 }),
     file,
   );
   await exited;
   expect(runs(file)).toBe(3);
 }, SLOW);
 
-test("a command that once ran healthy is restarted past its budget", async () => {
+test("a command that stays up without ever serving still stops after its budget", async () => {
+  const { restartScript } = await loadSandboxHost();
+  const file = ledger();
+  const { exited } = supervise(restartScript(`echo run >> "$RUNS"; sleep 2; exit 1`, servedMarker(file, false), QUICK), file);
+  await exited;
+  expect(runs(file)).toBe(QUICK.budget);
+}, SLOW);
+
+test("a command that served is restarted past its budget even when every run is short", async () => {
   const { restartScript } = await loadSandboxHost();
   const file = ledger();
   let exited = false;
-  const command = `if [ -s "$RUNS" ]; then first=0; else first=1; fi; echo run >> "$RUNS"; if [ "$first" -eq 1 ]; then sleep 2; fi; exit 1`;
-  void supervise(restartScript(command, { budget: 2, healthySeconds: 1, backoffSeconds: 0, backoffCeilingSeconds: 0 }), file).exited.then(() => {
+  void supervise(restartScript(`echo run >> "$RUNS"; exit 1`, servedMarker(file, true), QUICK), file).exited.then(() => {
     exited = true;
   });
-  expect(await until(() => runs(file) >= 6, 15_000)).toBe(true);
+  expect(await until(() => runs(file) >= QUICK.budget * 3, 15_000)).toBe(true);
   expect(exited).toBe(false);
 }, SLOW);
