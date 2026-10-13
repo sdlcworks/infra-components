@@ -16,6 +16,20 @@ export const PROCESS_CUSTODY_ROOT = path.join(os.tmpdir(), "sdlc-sandbox-host");
 export const STARTUP_DEADLINE_MS = 180_000;
 export const RESTART_BUDGET = 5;
 
+export interface RestartPolicy {
+  budget: number;
+  healthySeconds: number;
+  backoffSeconds: number;
+  backoffCeilingSeconds: number;
+}
+
+export const RESTART_POLICY: RestartPolicy = {
+  budget: RESTART_BUDGET,
+  healthySeconds: 30,
+  backoffSeconds: 2,
+  backoffCeilingSeconds: 60,
+};
+
 export const Refusal = {
   worldNotSandbox: "sandbox-host-world-not-sandbox",
   servingPortUndeclared: "sandbox-host-serving-port-undeclared",
@@ -28,7 +42,6 @@ export const Refusal = {
   retirementUnproven: "sandbox-host-retirement-unproven",
 } as const;
 
-const RESTART_BACKOFF_SECONDS = 2;
 const RETIREMENT_GRACE_MS = 15_000;
 const RETIREMENT_KILL_MS = 3_000;
 const PROBE_INTERVAL_MS = 100;
@@ -84,8 +97,17 @@ export function servingEndpoint(port: number, sandbox: string, ingressDomain: st
   return `https://${port}-${sandbox}.${ingressDomain}`;
 }
 
-export function restartScript(command: string): string {
-  return `attempt=0; while [ "$attempt" -lt ${RESTART_BUDGET} ]; do ( ${command} ); attempt=$((attempt + 1)); sleep ${RESTART_BACKOFF_SECONDS}; done`;
+export function restartScript(command: string, policy: RestartPolicy = RESTART_POLICY): string {
+  return [
+    `attempt=0; proven=0; delay=${policy.backoffSeconds}`,
+    `while [ "$proven" -eq 1 ] || [ "$attempt" -lt ${policy.budget} ]; do`,
+    `began=$(date +%s)`,
+    `( ${command} )`,
+    `if [ $(( $(date +%s) - began )) -ge ${policy.healthySeconds} ]; then proven=1; attempt=0; delay=${policy.backoffSeconds}; else attempt=$((attempt + 1)); fi`,
+    `sleep "$delay"`,
+    `if [ "$proven" -eq 1 ] && [ "$attempt" -gt 0 ]; then delay=$((delay * 2)); if [ "$delay" -gt ${policy.backoffCeilingSeconds} ]; then delay=${policy.backoffCeilingSeconds}; fi; fi`,
+    `done`,
+  ].join("\n");
 }
 
 function sleep(ms: number): Promise<void> {
