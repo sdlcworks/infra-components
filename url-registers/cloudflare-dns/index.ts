@@ -38,6 +38,7 @@ register.implement("cloudflare", {
     const provider = cloudflareProviderFromCredentials(
       $`cf-provider`,
       ctx.getCredentials,
+      { aliases: [{ name: $`cloudflare` }] },
     );
     const opts = { provider };
 
