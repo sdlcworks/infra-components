@@ -1,3 +1,6 @@
+import * as https from "node:https";
+import * as dns from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 import { z } from "zod";
 import { createHash } from "crypto";
 import { readFileSync, readdirSync, statSync, mkdtempSync, existsSync } from "fs";
@@ -35,7 +38,6 @@ import {
   waitForCloudRunOperation,
 } from "../_internal/gcp-helpers";
 
-// ---- Default Placeholder Worker Script ----
 
 const DEFAULT_WORKER_SCRIPT = `export default {
   async fetch(request, env, ctx) {
@@ -52,7 +54,6 @@ function artifactFilePath(uri: string): string {
   return uri.startsWith("file://") ? fileURLToPath(uri) : uri;
 }
 
-// ---- Workers upload (script, static-site, worker-assets) ----
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
 const ASSETS_BINDING_NAME = "ASSETS";
@@ -132,8 +133,6 @@ function walkFiles(root: string): string[] {
   return out;
 }
 
-// Manifest hash per the documented direct-upload contract:
-// sha256 over base64(content) + extension (no leading dot), first 32 hex chars.
 function assetManifestHash(content: Buffer, filePath: string): string {
   const ext = extname(filePath).slice(1);
   return createHash("sha256")
@@ -156,11 +155,168 @@ interface WorkerModule {
   contentType: string;
 }
 
+const RELEASE_WITNESS_PATH = "/.well-known/sdlc-release";
+const RELEASE_WITNESS_VERSION = 1;
+const RELEASE_WITNESS_MODULE = "__sdlc_release_witness.js";
+const PROOF_TIMEOUT_MS = 5_000;
+const PROOF_ATTEMPTS = 3;
+const PROOF_RETRY_MS = 1_000;
+const PROOF_MAX_BYTES = 4_096;
+const PROOF_REFUSAL = "public-release-proof-refused";
+const ROUTE_REFUSAL = "public-release-route-conflict";
+
+const PublicReleaseProofSchema = z.object({
+  url: z.string(),
+  route: z.object({ zoneId: z.string().regex(/^[a-zA-Z0-9_-]+$/), pattern: z.string() }),
+});
+type PublicReleaseProof = z.infer<typeof PublicReleaseProofSchema>;
+type ReleaseWitness = { version: number; release_identity: string; digest: string };
+
+function proofOrigin(proof: PublicReleaseProof): URL {
+  const url = new URL(proof.url);
+  if (url.protocol !== "https:" || url.username || url.password || url.port ||
+    url.search || url.hash || url.pathname !== "/" ||
+    (proof.url !== url.origin && proof.url !== url.origin + "/") ||
+    !url.hostname.includes(".") || url.hostname.endsWith(".") ||
+    /(^|\.)(localhost|local|internal|test|invalid)$/.test(url.hostname) ||
+    isIP(url.hostname.replace(/^\[|\]$/g, "")) || proof.route.pattern !== `${url.hostname}/*`) {
+    throw new Error(`${PROOF_REFUSAL}: expected exact public HTTPS origin and matching route`);
+  }
+  return url;
+}
+
+function releaseWitness(path: string, digest: string | undefined, release: string | undefined): ReleaseWitness {
+  const parts = /^(?:(md5|sha256):)?([a-f0-9]+)$/i.exec(digest ?? "");
+  const canonical = parts?.[2]?.toLowerCase() ?? "";
+  const algorithm = parts?.[1]?.toLowerCase() ?? (canonical.length === 32 ? "md5" : "sha256");
+  const size = algorithm === "md5" ? 32 : 64;
+  if (!release?.trim() || !parts || canonical.length !== size) {
+    throw new Error(`${PROOF_REFUSAL}: admitted MD5 or SHA-256 digest and release identity required`);
+  }
+  if (createHash(algorithm).update(readFileSync(path)).digest("hex") !== canonical) {
+    throw new Error(`${PROOF_REFUSAL}: artifact-digest-mismatch`);
+  }
+  return { version: RELEASE_WITNESS_VERSION, release_identity: release, digest: `${algorithm}:${canonical}` };
+}
+
+function witnessModules(modules: WorkerModule[], witness?: ReleaseWitness): WorkerModule[] {
+  if (!witness) return modules;
+  if (modules.some((module) => module.name === RELEASE_WITNESS_MODULE)) {
+    throw new Error(`${PROOF_REFUSAL}: reserved witness module already present`);
+  }
+  const content = `import original from './${WORKER_MAIN_MODULE}';
+export * from './${WORKER_MAIN_MODULE}';
+const witness = ${JSON.stringify(witness)};
+function answer(request) {
+  if (new URL(request.url).pathname === ${JSON.stringify(RELEASE_WITNESS_PATH)}) {
+    return Response.json(witness, { headers: { 'Cache-Control': 'no-store' } });
+  }
+}
+const wrapped = typeof original === 'function'
+  ? class extends original { fetch(request, ...args) { return answer(request) ?? super.fetch(request, ...args); } }
+  : { ...original, fetch(request, ...args) { return answer(request) ?? original.fetch.call(original, request, ...args); } };
+export default wrapped;`;
+  return [...modules, { name: RELEASE_WITNESS_MODULE, content, contentType: ESM_MODULE_CONTENT_TYPE }];
+}
+
+async function exactRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string): Promise<boolean> {
+  const response = await fetch(`${CLOUDFLARE_API_BASE}/zones/${proof.route.zoneId}/workers/routes`, {
+    headers: { Authorization: `Bearer ${apiToken}` }, signal: AbortSignal.timeout(PROOF_TIMEOUT_MS), redirect: "error",
+  });
+  if (!response.ok) throw new Error(`${PROOF_REFUSAL}: route observation failed (${response.status})`);
+  const payload = await response.json() as { success?: boolean; result?: { pattern: string; script?: string }[] };
+  if (payload.success === false || !Array.isArray(payload.result)) throw new Error(`${PROOF_REFUSAL}: invalid route observation`);
+  const matches = payload.result.filter((route) => route.pattern === proof.route.pattern);
+  if (matches.length > 1 || matches.some((route) => route.script !== scriptName)) throw new Error(`${ROUTE_REFUSAL}: exact route has a foreign holder`);
+  return matches.length === 1;
+}
+
+async function reconcileRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string): Promise<void> {
+  if (await exactRoute(proof, scriptName, apiToken)) return;
+  try {
+    await fetch(`${CLOUDFLARE_API_BASE}/zones/${proof.route.zoneId}/workers/routes`, {
+      method: "POST", headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ pattern: proof.route.pattern, script: scriptName }),
+      signal: AbortSignal.timeout(PROOF_TIMEOUT_MS), redirect: "error",
+    });
+  } catch {}
+  if (!await exactRoute(proof, scriptName, apiToken)) throw new Error(`${PROOF_REFUSAL}: route creation unconfirmed`);
+}
+
+const forbiddenAddresses = new BlockList();
+for (const [address, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
+  ["224.0.0.0", 3],
+] as const) forbiddenAddresses.addSubnet(address, prefix, "ipv4");
+for (const [address, prefix] of [["2001::", 23], ["2001:db8::", 32], ["2002::", 16]] as const) forbiddenAddresses.addSubnet(address, prefix, "ipv6");
+
+function publicAddress(address: string): boolean {
+  const family = isIP(address);
+  return family === 4 ? !forbiddenAddresses.check(address, "ipv4") :
+    family === 6 && /^[23][a-fA-F0-9]{3}:/.test(address) && !forbiddenAddresses.check(address, "ipv6");
+}
+
+async function publicWitness(url: URL): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      agent: false,
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+      lookup: (hostname, options, callback) => {
+        dns.lookup(hostname, { all: true }).then((addresses) => {
+          if (hostname !== url.hostname || !addresses.length || addresses.some(({ address }) => !publicAddress(address))) {
+            callback(new Error(`${PROOF_REFUSAL}: private or alternate destination`), "", 4);
+            return;
+          }
+          if (options.all) callback(null, addresses);
+          else callback(null, addresses[0]!.address, addresses[0]!.family);
+        }, (error) => callback(error, "", 4));
+      },
+    }, (response) => {
+      if (response.statusCode !== 200) {
+        request.destroy(new Error(`${PROOF_REFUSAL}: witness HTTP ${response.statusCode}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > PROOF_MAX_BYTES) request.destroy(new Error(`${PROOF_REFUSAL}: oversized witness`));
+        else chunks.push(chunk);
+      });
+      response.on("error", reject);
+      response.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+        catch { reject(new Error(`${PROOF_REFUSAL}: invalid witness`)); }
+      });
+    });
+    const timeout = setTimeout(() => request.destroy(new Error(`${PROOF_REFUSAL}: witness timeout`)), PROOF_TIMEOUT_MS);
+    request.on("error", reject);
+    request.on("close", () => clearTimeout(timeout));
+  });
+}
+
+async function observePublicRelease(proof: PublicReleaseProof, witness: ReleaseWitness): Promise<void> {
+  const url = new URL(RELEASE_WITNESS_PATH, proofOrigin(proof));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < PROOF_ATTEMPTS; attempt++) {
+    try {
+      const observed = await publicWitness(url) as Partial<ReleaseWitness> | null;
+      if (observed?.version === witness.version && observed.release_identity === witness.release_identity && observed.digest === witness.digest) return;
+      throw new Error(`${PROOF_REFUSAL}: release witness mismatch`);
+    } catch (error) { lastError = error; }
+    if (attempt + 1 < PROOF_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, PROOF_RETRY_MS));
+  }
+  throw lastError;
+}
+
 interface DeployArgs {
   accountId: string;
   scriptName: string;
   apiToken: string;
   artifactPath: string;
+  witness?: ReleaseWitness;
   settings: ScriptSettings;
   bindings: Record<string, unknown>[];
 }
@@ -304,7 +460,14 @@ async function putWorkerScript(
   apiToken: string,
   metadata: Record<string, unknown>,
   modules: WorkerModule[],
+  witness?: ReleaseWitness,
 ): Promise<void> {
+  modules = witnessModules(modules, witness);
+  if (witness) {
+    metadata.main_module = RELEASE_WITNESS_MODULE;
+    const assets = metadata.assets as { config: Record<string, unknown> } | undefined;
+    if (assets) assets.config.run_worker_first = [RELEASE_WITNESS_PATH];
+  }
   const form = new FormData();
   form.append(
     "metadata",
@@ -313,7 +476,7 @@ async function putWorkerScript(
   for (const module of modules) {
     form.append(
       module.name,
-      new Blob([module.content], { type: module.contentType }),
+      new Blob([typeof module.content === "string" ? module.content : new Uint8Array(module.content)], { type: module.contentType }),
       module.name,
     );
   }
@@ -353,6 +516,7 @@ async function deployScript(args: DeployArgs): Promise<void> {
         contentType: ESM_MODULE_CONTENT_TYPE,
       },
     ],
+    args.witness,
   );
 }
 
@@ -380,6 +544,7 @@ async function deployStaticSite(args: DeployArgs): Promise<void> {
         contentType: ESM_MODULE_CONTENT_TYPE,
       },
     ],
+    args.witness,
   );
 }
 
@@ -418,13 +583,13 @@ async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
       assets: assetsMetadata(args.settings, jwt, WORKER_ASSETS_NOT_FOUND_HANDLING),
     },
     modules,
+    args.witness,
   );
   console.error(
     `worker-assets: worker '${args.scriptName}' deployed with ${modules.length} modules`,
   );
 }
 
-// ---- Zod Enums for Config Options ----
 
 const IngressType = z.enum([
   "INGRESS_TRAFFIC_ALL",
@@ -439,7 +604,6 @@ const ExecutionEnvironment = z.enum([
   "EXECUTION_ENVIRONMENT_GEN2",
 ]);
 
-// ---- Reusable Schema Definitions ----
 
 const EnvVarSchema = z.object({
   name: z.string(),
@@ -466,7 +630,6 @@ const LoadBalancerIntegrationSchema = z.object({
   enabled: z.boolean().default(false),
 });
 
-// ---- Cloudflare-specific Schema Definitions ----
 
 const CloudflareRoutingSchema = z.discriminatedUnion("type", [
   z.object({
@@ -486,7 +649,6 @@ const CloudflareRoutingSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-// ---- Cloudflare Binding Schema Definitions ----
 
 const R2BindingSchema = z.object({
   name: z.string().describe("Binding name accessible in Worker code"),
@@ -546,7 +708,6 @@ const CloudflareLimitsSchema = z.object({
   cpuMs: z.number().min(5).max(30000).default(50),
 });
 
-// ---- Per-App-Component Schemas (dezite allocation model) ----
 
 const IngressRuleSchema = z.object({
   host: z.string(),
@@ -560,7 +721,6 @@ const AllocationSchema = z.object({
   ingressHosts: z.array(z.string()).default([]),
 });
 
-// ---- Component Definition ----
 
 const component = new InfraComponent({
   metadata: {
@@ -598,49 +758,37 @@ const component = new InfraComponent({
     PublicCI,
   ],
   configSchema: z.object({
-    // Core (GCloud)
     region: z.string().default("us-central1").optional(),
 
-    // Ingress Configuration (GCloud)
     ingress: IngressType.default("INGRESS_TRAFFIC_ALL").optional(),
 
-    // VPC Configuration (GCloud)
     vpcAccess: VpcAccessSchema.optional(),
 
-    // Container Configuration (GCloud)
     containerPort: z.number().default(8080).optional(),
     secretEnvironmentVariables: z.array(SecretEnvVarSchema).default([]),
 
-    // Resource Configuration (GCloud)
     resources: ResourceLimitsSchema.default({
       cpu: "1000m",
       memory: "512Mi",
     }).optional(),
 
-    // Scaling Configuration (GCloud)
     minScale: z.number().min(0).default(0).optional(),
     maxScale: z.number().min(1).default(100).optional(),
     maxConcurrency: z.number().min(1).default(80).optional(),
 
-    // Execution Environment (GCloud)
     executionEnvironment: ExecutionEnvironment.default(
       "EXECUTION_ENVIRONMENT_GEN2"
     ).optional(),
 
-    // Timeouts (GCloud)
     requestTimeout: z.string().default("300s").optional(),
     startupTimeout: z.string().optional(),
 
-    // Session Affinity (GCloud)
     sessionAffinity: z.boolean().default(false).optional(),
 
-    // Load Balancer Integration (GCloud)
     loadBalancerIntegration: LoadBalancerIntegrationSchema.optional(),
 
-    // Shared: Environment Variables
     environmentVariables: z.array(EnvVarSchema).default([]),
 
-    // Cloudflare-specific fields
     accountId: z.string().optional(),
     routing: CloudflareRoutingSchema.optional(),
     compatibilityDate: z.string().default("2024-01-01").optional(),
@@ -675,6 +823,7 @@ const component = new InfraComponent({
   }),
   appComponentTypes: {
     "http-service": z.object({
+      publicReleaseProof: PublicReleaseProofSchema.optional(),
       service: z.string().optional(),
       region: z.string().default("us-central1"),
       containerPort: z.number().default(8080),
@@ -689,7 +838,7 @@ const component = new InfraComponent({
         rules: z.array(IngressRuleSchema).default([]),
       }).optional(),
     }),
-    "default": z.object({}),
+    "default": z.object({ publicReleaseProof: PublicReleaseProofSchema.optional() }),
   },
   outputSchema: z.object({
     id: z.string(),
@@ -702,7 +851,6 @@ const component = new InfraComponent({
   }),
 });
 
-// ---- GCloud Provider Implementation ----
 
 component.implement("gcloud", {
   stateSchema: z.object({
@@ -714,10 +862,8 @@ component.implement("gcloud", {
     containerPort: z.number(),
     backendServiceId: z.string().optional(),
     negId: z.string().optional(),
-    // HTTP trigger SA credentials
     httpTriggerSaEmail: z.string(),
     httpTriggerSaKeyJson: z.string(),
-    // Per-app-component allocations
     allocations: z.record(z.string(), AllocationSchema).default({}),
   }),
   initialState: { allocations: {} },
@@ -749,19 +895,11 @@ component.implement("gcloud", {
       loadBalancerIntegration,
     } = inputs;
 
-    // When app components target this infra, allocateWithPulumiCtx creates
-    // per-app Cloud Run services. The singleton resources below are only
-    // needed when NO app components target this infra (standalone mode).
-    // Detect the per-app allocation case via buildArtifacts or envStore
-    // having entries — the orchestrator populates both for every app
-    // component with an active infra_target pointing here.
     const hasAppComponentTargets =
       Object.keys(buildArtifacts).length > 0 ||
       Object.keys(envStore).length > 0;
 
     if (hasAppComponentTargets) {
-      // Per-app allocation mode: allocateWithPulumiCtx handles all Cloud Run
-      // services. Skip singleton resources to avoid waste.
       const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
       state.region = region;
       state.project = project;
@@ -775,28 +913,22 @@ component.implement("gcloud", {
       };
     }
 
-    // Standalone mode: no app components target this infra, create the
-    // singleton Cloud Run service directly.
 
-    // Default opts for all GCP resources — uses the explicit provider
     const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
       ? { provider: gcpProvider }
       : {};
 
-    // Get container image from buildArtifacts (first component being deployed)
     const componentEntries = Object.entries(buildArtifacts);
     const containerImage =
       componentEntries.length > 0
         ? componentEntries[0][1].artifact.uri
         : "us-docker.pkg.dev/cloudrun/container/hello";
 
-    // Create service account
     const serviceAccount = new gcp.serviceaccount.Account($`service-account`, {
       accountId: $`sa`,
       displayName: "Service account for Cloud Run service",
     }, gcpOpts);
 
-    // Build environment variables
     const envVars = [
       ...environmentVariables.map((env) => ({
         name: env.name,
@@ -866,16 +998,13 @@ component.implement("gcloud", {
       },
     }, gcpOpts);
 
-    // Get GCP project from credentials (v2 credential shape)
     const project = (getCredentials() as Record<string, string>).GCP_PROJECT_ID;
 
-    // Create dedicated service account for HTTP triggering
     const httpTriggerSa = new gcp.serviceaccount.Account($`http-trigger-sa`, {
       accountId: $`http-sa`,
       displayName: "Service account for HTTP triggering of Cloud Run service",
     }, gcpOpts);
 
-    // Grant the HTTP trigger SA permission to invoke the service
     new gcp.cloudrunv2.ServiceIamMember($`http-trigger-iam`, {
       location: region,
       name: service.name,
@@ -883,12 +1012,10 @@ component.implement("gcloud", {
       member: pulumi.interpolate`serviceAccount:${httpTriggerSa.email}`,
     }, gcpOpts);
 
-    // Create a key for the HTTP trigger SA
     const httpTriggerSaKey = new gcp.serviceaccount.Key($`http-trigger-sa-key`, {
       serviceAccountId: httpTriggerSa.name,
     }, gcpOpts);
 
-    // Store state for connection handlers
     state.serviceName = service.name;
     state.region = region;
     state.project = project;
@@ -896,16 +1023,13 @@ component.implement("gcloud", {
     state.httpTriggerSaEmail = httpTriggerSa.email;
     state.httpTriggerSaKeyJson = httpTriggerSaKey.privateKey;
 
-    // Track service account email + container port for connect + allocate handlers
     state.serviceAccountEmail = serviceAccount.email;
     state.containerPort = containerPort;
 
-    // Create Backend Service resources if load balancer integration enabled
     let backendServiceId: any;
     let negId: any;
 
     if (loadBalancerIntegration?.enabled) {
-      // Create Serverless NEG pointing to Cloud Run
       const neg = new gcp.compute.RegionNetworkEndpointGroup($`neg`, {
         region: region,
         networkEndpointType: "SERVERLESS",
@@ -914,7 +1038,6 @@ component.implement("gcloud", {
         },
       }, gcpOpts);
 
-      // Create Backend Service for external load balancer
       const backendService = new gcp.compute.BackendService(
         $`backend-service`,
         {
@@ -937,8 +1060,6 @@ component.implement("gcloud", {
       state.backendServiceId = backendService.selfLink;
       state.negId = neg.selfLink;
 
-      // Allow unauthenticated access through the load balancer
-      // The INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER setting ensures only LB traffic reaches the service
       new gcp.cloudrunv2.ServiceIamMember($`lb-invoker`, {
         location: region,
         name: service.name,
@@ -998,15 +1119,12 @@ component.implement("gcloud", {
       buildArtifact?.artifact?.uri ??
       "us-docker.pkg.dev/cloudrun/container/hello";
 
-    // Resolved env vars for THIS app component, supplied by the orchestrator
-    // from the TSC's components.<name>.env after $[[...]] interpolation.
     const envForComponent = (envStore?.[name] ?? {}) as Record<string, string>;
     const envEntries = Object.entries(envForComponent).map(([k, v]) => ({
       name: k,
       value: v,
     }));
 
-    // Cloud Run v2 rejects cpu < 1 with always-allocated CPU.
     const cpuFractional = parseFloat(cpu) < 1;
     const effectiveCpuIdle = cpuFractional || cpuIdle;
     const effectiveStartupCpuBoost = cpuFractional ? false : startupCpuBoost;
@@ -1042,7 +1160,6 @@ component.implement("gcloud", {
       gcpOpts,
     );
 
-    // Allow unauthenticated access (public service)
     new gcp.cloudrunv2.ServiceIamMember(
       $`public-invoker-${name}`,
       {
@@ -1141,8 +1258,13 @@ component.implement("gcloud", {
     }),
   ],
 
-  upsertArtifacts: async ({ buildArtifacts, state, envStore, getCredentials }) => {
+  upsertArtifacts: async ({ buildArtifacts, state, envStore, getCredentials, deploymentConfigs }) => {
     const componentEntries = Object.entries(buildArtifacts);
+    for (const [componentName] of componentEntries) {
+      if (deploymentConfigs?.[componentName]?.publicReleaseProof !== undefined) {
+        throw new Error("public-release-proof-unsupported: gcloud does not implement public release proof");
+      }
+    }
     if (componentEntries.length === 0) {
       console.error("No artifacts to deploy");
       return;
@@ -1232,13 +1354,13 @@ component.implement("gcloud", {
   },
 });
 
-// ---- Cloudflare Provider Implementation ----
 
 component.implement("cloudflare", {
   stateSchema: z.object({
     scriptName: z.string(),
     accountId: z.string(),
     workerUri: z.string(),
+    publicRoute: PublicReleaseProofSchema.shape.route.optional(),
     assetMode: z.enum(ASSET_MODES).optional(),
     scriptSettings: z
       .object({
@@ -1316,6 +1438,8 @@ component.implement("cloudflare", {
     const scriptName = $`worker`;
     state.scriptName = scriptName;
     state.accountId = accountId;
+    const retainedRouting = routing as z.infer<typeof CloudflareRoutingSchema> | undefined;
+    state.publicRoute = retainedRouting?.type === "route" ? { zoneId: retainedRouting.zoneId, pattern: retainedRouting.pattern } : undefined;
 
     const componentEntries = Object.entries(buildArtifacts);
     let scriptFile: string | undefined;
@@ -1323,7 +1447,8 @@ component.implement("cloudflare", {
     let scriptContent: string | undefined;
 
     if (componentEntries.length > 0 && !deploysContentAtRelease) {
-      const artifact = componentEntries[0][1].artifact;
+      if (componentEntries.length !== 1) throw new Error(`${PROOF_REFUSAL}: ambiguous applications for one Worker`);
+      const artifact = componentEntries[0]![1].artifact;
 
       if (artifact.type !== DeploymentArtifactType.file) {
         throw new Error(
@@ -1471,8 +1596,6 @@ component.implement("cloudflare", {
       logpush: logpush || false,
     }, cfOpts);
 
-    // Always enable workers.dev subdomain for the worker
-    // This ensures the worker is accessible even without custom routing
     const workerSubdomain = new cloudflare.WorkersScriptSubdomain($`subdomain`, {
       accountId: accountId,
       scriptName: scriptName,
@@ -1480,12 +1603,10 @@ component.implement("cloudflare", {
       previewsEnabled: routing?.type === "subdomain" ? routing.previewsEnabled : false,
     }, { dependsOn: [worker], ...cfOpts });
 
-    // Handle routing configuration
     let workerUri: pulumi.Output<string>;
 
     if (routing) {
       if (routing.type === "route") {
-        // Create Workers Route for zone-based routing
         new cloudflare.WorkersRoute($`route`, {
           zoneId: routing.zoneId,
           pattern: routing.pattern,
@@ -1497,7 +1618,6 @@ component.implement("cloudflare", {
           ""
         )}`;
       } else if (routing.type === "customDomain") {
-        // Create Custom Domain for the worker
         new cloudflare.WorkersCustomDomain($`domain`, {
           accountId: accountId,
           zoneId: routing.zoneId,
@@ -1507,16 +1627,12 @@ component.implement("cloudflare", {
 
         workerUri = pulumi.interpolate`https://${routing.hostname}`;
       } else {
-        // Subdomain routing (workers.dev)
-        // The script is automatically available at <scriptName>.<subdomain>.workers.dev
         workerUri = pulumi.interpolate`https://${scriptName}.workers.dev`;
       }
     } else {
-      // Default: use workers.dev subdomain
       workerUri = pulumi.interpolate`https://${scriptName}.workers.dev`;
     }
 
-    // Store worker URI in state
     state.workerUri = workerUri;
 
     return {
@@ -1570,10 +1686,6 @@ component.implement("cloudflare", {
             `serverless-fn(cloudflare): no allocation found for '${selfComponentName}' — was it allocated via allocateWithPulumiCtx?`,
           );
         }
-        // A route-pattern worker's URI hosts a wildcard (e.g. *.example.com),
-        // which cannot serve as a DNS origin target; the zone apex can, and a
-        // proxied record is intercepted by the worker route before the target
-        // is ever contacted.
         const host = pulumi.output(allocation.workerUri).apply((uri: string) => {
           if (!uri) return "";
           try {
@@ -1596,14 +1708,26 @@ component.implement("cloudflare", {
     }),
   ]),
 
-  upsertArtifacts: async ({ buildArtifacts, state, getCredentials }) => {
+  upsertArtifacts: async ({ buildArtifacts, state, getCredentials, deploymentConfigs, releaseIdentities }) => {
     const componentEntries = Object.entries(buildArtifacts);
     if (componentEntries.length === 0) {
       console.error("No artifacts to deploy");
       return;
     }
 
-    const artifact = componentEntries[0][1].artifact;
+    if (componentEntries.length !== 1) throw new Error(`${PROOF_REFUSAL}: ambiguous applications for one Worker`);
+    const [componentName, artifactInfo] = componentEntries[0]!;
+    const artifact = artifactInfo.artifact;
+    const proofInput = deploymentConfigs?.[componentName]?.publicReleaseProof;
+    const proof = proofInput === undefined ? undefined : PublicReleaseProofSchema.parse(proofInput);
+    if (proof) {
+      const origin = proofOrigin(proof);
+      const retainedRoute = state.publicRoute as PublicReleaseProof["route"] | undefined;
+      if ((retainedRoute && (retainedRoute.zoneId !== proof.route.zoneId || retainedRoute.pattern !== proof.route.pattern)) ||
+        (state.workerUri && new URL(state.workerUri as string).origin !== origin.origin)) {
+        throw new Error(`${PROOF_REFUSAL}: retained route identity disagrees`);
+      }
+    }
     if (artifact.type !== DeploymentArtifactType.file) {
       throw new Error(
         `serverless-fn(cloudflare): expects a file artifact (bundled Worker script), received "${artifact.type}". ` +
@@ -1624,13 +1748,17 @@ component.implement("cloudflare", {
       );
     }
 
+    const witness = proof ? releaseWitness(localFilePath, artifact.digest, releaseIdentities?.[componentName]) : undefined;
     const credentials = getCredentials();
+    if (proof && !credentials.CLOUDFLARE_API_TOKEN) throw new Error(`${PROOF_REFUSAL}: protected route authority required`);
+    if (proof) await exactRoute(proof, state.scriptName as string, credentials.CLOUDFLARE_API_TOKEN as string);
     const settings = state.scriptSettings as ScriptSettings;
     const args: DeployArgs = {
       accountId: state.accountId as string,
       scriptName: state.scriptName as string,
       apiToken: credentials.CLOUDFLARE_API_TOKEN as string,
       artifactPath: localFilePath,
+      witness,
       settings,
       bindings: deployBindings(settings, credentials),
     };
@@ -1641,6 +1769,11 @@ component.implement("cloudflare", {
     if (mode === "worker-assets") await deployWorkerWithAssets(args);
     else if (mode === "static-site") await deployStaticSite(args);
     else await deployScript(args);
+
+    if (proof && witness) {
+      await reconcileRoute(proof, args.scriptName, args.apiToken);
+      await observePublicRelease(proof, witness);
+    }
 
     console.error(`Successfully deployed worker script: ${args.scriptName} (${mode})`);
   },
