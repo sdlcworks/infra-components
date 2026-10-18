@@ -1,5 +1,6 @@
 ["@infra-components"]
 infra_code = true
+derived_paths = [".js/node_modules", ".js/dist", ".js/metadata.json", ".js/infra-bundle.tar.gz"]
 
 ["@infra-components".build.default]
 managed_lifetime = "process-group-v1"
