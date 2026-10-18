@@ -4,6 +4,7 @@ derived_paths = [".js/node_modules", ".js/dist", ".js/metadata.json", ".js/infra
 
 ["@infra-components".build.default]
 managed_lifetime = "process-group-v1"
+companions = ["scb"]
 build_inputs = { include = ["**"], exclude = [".js/**"] }
 build_cmd = "(cd .js && bun install) && sdlc-components-build --bundle"
 build_destination = "file://.js/infra-bundle.tar.gz"
