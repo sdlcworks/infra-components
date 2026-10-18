@@ -127,11 +127,27 @@ const TUPLE_FILE = "environment.json";
 const CONTROL_FILE = "control.json";
 const CONTROL_TIMEOUT_MS = 1500;
 
+const ADMISSION_CLOCK_EXECUTABLE = process.env.SDLC_WORKSPACE_CLOCK_EXECUTABLE;
+
 export function readAdmissionClock(load:NodeRequire=createRequire(import.meta.url)):{boot_identity:string;now_ns:string} {
-  return nativeAdmissionClock(load);
+  return nativeAdmissionClock(load, ADMISSION_CLOCK_EXECUTABLE);
 }
 
-function nativeAdmissionClock(load:NodeRequire):{boot_identity:string;now_ns:string} {
+function nativeAdmissionClock(load:NodeRequire, executable?:string):{boot_identity:string;now_ns:string} {
+  if(process.platform === "darwin" && !process.versions.bun) {
+    const path = load("node:path") as typeof import("node:path");
+    if(!executable || !path.isAbsolute(executable)) throw new Error("sandbox-host-clock-unavailable");
+    const script = `const {dlopen,FFIType,ptr}=require("bun:ffi");
+const library=dlopen("/usr/lib/libSystem.B.dylib",{mach_continuous_time:{args:[],returns:FFIType.u64},mach_timebase_info:{args:[FFIType.ptr],returns:FFIType.i32}});
+const ratio=new Uint32Array(2);
+if(library.symbols.mach_timebase_info(ptr(ratio))!==0||!ratio[0]||!ratio[1])throw new Error("clock-unavailable");
+const boot=require("node:child_process").execFileSync("/usr/sbin/sysctl",["-n","kern.bootsessionuuid"],{encoding:"utf8",timeout:500}).trim();
+process.stdout.write(JSON.stringify({boot_identity:boot,now_ns:(BigInt(library.symbols.mach_continuous_time())*BigInt(ratio[0])/BigInt(ratio[1])).toString()}));`;
+    const output = (load("node:child_process") as typeof import("node:child_process")).execFileSync(executable, ["--no-env-file", "-e", script], {encoding:"utf8",timeout:1000,maxBuffer:1024,cwd:"/",env:{},stdio:["ignore","pipe","pipe"]});
+    const sample = JSON.parse(output);
+    if(!sample || Object.keys(sample).sort().join(",") !== "boot_identity,now_ns" || typeof sample.boot_identity !== "string" || !/^[0-9A-Fa-f-]{36}$/.test(sample.boot_identity) || typeof sample.now_ns !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(sample.now_ns) || BigInt(sample.now_ns)>BigInt("18446744073709551615")) throw new Error("sandbox-host-clock-unavailable");
+    return sample;
+  }
   const holder=globalThis as typeof globalThis & {__sdlcResidentClock?:{boot:string;read:()=>bigint}};
   if(!holder.__sdlcResidentClock){
     const fs=load("node:fs") as typeof import("node:fs");
@@ -622,7 +638,7 @@ function launch(component: string, dir: string, command: string, environment: Re
     const control = guarded ? randomUUID() : "";
     if (guarded) fs.mkdirSync(path.join(dir, control), { mode: 0o700 });
     const args = guarded
-      ? ["-e", `const readAdmissionClock=${nativeAdmissionClock.toString()}; (${managedSupervisor.toString()})(${JSON.stringify({ file: context.file, tuple: context.tuple, root: context.sessionRoot, control: path.join(dir, control), identity, command, marker: managed?.marker ?? path.join(dir, SERVED_FILE), managed, attemptDirectory:dir, policy: RESTART_POLICY, grace: RETIREMENT_GRACE_MS, interval: PROBE_INTERVAL_MS })}, ${readSession.toString()}, ${privateJSON.toString()}, require, ${ownerLock.toString()});`]
+      ? ["-e", `const nativeAdmissionClock=${nativeAdmissionClock.toString()}; const readAdmissionClock=(load)=>nativeAdmissionClock(load,${JSON.stringify(ADMISSION_CLOCK_EXECUTABLE)}); (${managedSupervisor.toString()})(${JSON.stringify({ file: context.file, tuple: context.tuple, root: context.sessionRoot, control: path.join(dir, control), identity, command, marker: managed?.marker ?? path.join(dir, SERVED_FILE), managed, attemptDirectory:dir, policy: RESTART_POLICY, grace: RETIREMENT_GRACE_MS, interval: PROBE_INTERVAL_MS })}, ${readSession.toString()}, ${privateJSON.toString()}, require, ${ownerLock.toString()});`]
       : ["-c", restartScript(command, path.join(dir, SERVED_FILE))];
     const child = spawn(guarded ? process.execPath : SHELL, args, { cwd, env: environment, detached: true, stdio: ["ignore", log, log] });
     child.once("error", () => {});

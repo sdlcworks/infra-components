@@ -1,6 +1,14 @@
 ---
 name: resident-workspace-process-host
 definition: >
+  Machine clock observation consumes the exact capability supplied by the trusted
+  constructor of the declared execution environment. Workers and surviving
+  supervisors retain that same realized capability independently of the authored
+  application environment; ambient executable discovery or caller-selected
+  replacement cannot establish clock ground. A bounded read-only observation
+  must return the original boot domain and suspend-inclusive monotonic time.
+  Unavailable, malformed or changed clock ground refuses new entry and restart;
+  no fallback may rebase an existing absolute cutoff or erase stop responsibility.
   Realizes an admitted workspace release as managed processes resident in the
   enactor's actual environment and publishes an endpoint only after witnessed
   listening. A source binding identifies intended content and placement; it
