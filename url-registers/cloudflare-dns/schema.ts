@@ -8,6 +8,8 @@ export const RecordOverrideSchema = z.object({
   proxied: z.boolean().optional(),
   /** Override auto-inferred record type (A/AAAA/CNAME). Auto-inferred from metadata.host otherwise. */
   type: z.enum(RECORD_TYPE_VALUES).optional(),
+  /** Explicit record content. When set, replaces the component-host-derived content — required where the component's host is the record's own fqdn (worker-served hosts). */
+  content: z.string().min(1).optional(),
   /** TTL in seconds. Ignored when proxied (Cloudflare forces automatic). Falls back to defaults.ttl → CF_TTL_AUTO. */
   ttl: z.number().int().positive().optional(),
   /** Optional comment stored on the Cloudflare DNS record. */
