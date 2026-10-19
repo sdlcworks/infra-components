@@ -4767,7 +4767,11 @@ function buildDeployment({
   new k8s.apps.v1.Deployment(
     $`deploy-${name}`,
     {
-      metadata: { name, namespace: namespaceName },
+      metadata: {
+        name,
+        namespace: namespaceName,
+        annotations: { "pulumi.com/patchForce": "true" },
+      },
       spec: {
         replicas: config.autoscaling?.enabled ? undefined : config.replicas,
         selector: { matchLabels: appLabels },

@@ -74,7 +74,9 @@ export function ruleNeedsTraefikRoute(
   );
 }
 
-// Traefik v2 rule string for one declared ingress rule: facts AND-composed.
+// Traefik v3 rule string for one declared ingress rule: facts AND-composed.
+// v3 removed multi-arg Method() and HeadersRegexp(); methods OR-compose and
+// header matching is HeaderRegexp.
 export function traefikRouteMatch(
   rule: z.infer<typeof IngressRuleSchema>,
 ): string {
@@ -87,10 +89,11 @@ export function traefikRouteMatch(
     );
   }
   if (rule.match?.methods) {
-    parts.push(`Method(${rule.match.methods.map((m) => `\`${m}\``).join(",")})`);
+    const methods = rule.match.methods.map((m) => `Method(\`${m}\`)`);
+    parts.push(methods.length === 1 ? methods[0] : `(${methods.join(" || ")})`);
   }
   if (rule.match?.acceptContains) {
-    parts.push(`HeadersRegexp(\`Accept\`, \`${rule.match.acceptContains}\`)`);
+    parts.push(`HeaderRegexp(\`Accept\`, \`${rule.match.acceptContains}\`)`);
   }
   return parts.join(" && ");
 }

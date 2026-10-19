@@ -46,7 +46,7 @@ test("AND-composes declared facts into one Traefik v2 match", () => {
         publicTrust: true,
       }),
     ),
-  ).toBe("Host(`mcp.example.test`) && Method(`POST`,`DELETE`,`OPTIONS`)");
+  ).toBe("Host(`mcp.example.test`) && (Method(`POST`) || Method(`DELETE`) || Method(`OPTIONS`))");
 
   expect(
     traefikRouteMatch(
@@ -63,7 +63,7 @@ test("AND-composes declared facts into one Traefik v2 match", () => {
       }),
     ),
   ).toBe(
-    "Host(`mcp.example.test`) && HeadersRegexp(`Accept`, `text/event-stream`)",
+    "Host(`mcp.example.test`) && HeaderRegexp(`Accept`, `text/event-stream`)",
   );
 
   expect(
@@ -77,7 +77,7 @@ test("AND-composes declared facts into one Traefik v2 match", () => {
     ),
   ).toBe(
     "Host(`mcp.example.test`) && Path(`/mcp`) && Method(`POST`) && " +
-      "HeadersRegexp(`Accept`, `text/event-stream`)",
+      "HeaderRegexp(`Accept`, `text/event-stream`)",
   );
 });
 

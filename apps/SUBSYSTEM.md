@@ -43,7 +43,9 @@ outputs:
   - name: deployable-code-artifact
     description: >
       Per-application function-code content identity supplied by an application
-      release for deployment to its allocated function.
+      release for deployment to its allocated function. The exact release
+      identity and authored deployment configuration accompany that content,
+      including any required public-release proof.
   - name: workload-connection-material
     description: >
       Typed endpoint, credential, and authorization meanings declared for each

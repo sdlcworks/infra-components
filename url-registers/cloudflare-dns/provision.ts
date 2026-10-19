@@ -87,9 +87,12 @@ export function createDnsRecord({
   proxied,
   ttl,
 }: CreateRecordArgs): void {
+  const effectiveContent: pulumi.Output<string> = rcfg.content
+    ? pulumi.output(rcfg.content)
+    : host;
   const recordType: pulumi.Input<string> = rcfg.type
     ? rcfg.type
-    : host.apply(inferRecordType);
+    : effectiveContent.apply(inferRecordType);
 
   const resourceKey = sanitizeSubdomainForResourceName(rcfg.name);
 
@@ -97,13 +100,16 @@ export function createDnsRecord({
     zoneId,
     name: rcfg.name,
     type: recordType,
-    content: host,
+    content: effectiveContent,
     proxied,
     ttl,
     ...(rcfg.comment !== undefined ? { comment: rcfg.comment } : {}),
   };
 
-  new cloudflare.DnsRecord($`dns-${appName}-${resourceKey}`, args, opts);
+  new cloudflare.DnsRecord($`dns-${appName}-${resourceKey}`, args, {
+    ...opts,
+    deleteBeforeReplace: true,
+  });
 }
 
 export type BuildResultArgs = {
