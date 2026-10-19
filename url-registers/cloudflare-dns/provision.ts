@@ -103,7 +103,10 @@ export function createDnsRecord({
     ...(rcfg.comment !== undefined ? { comment: rcfg.comment } : {}),
   };
 
-  new cloudflare.DnsRecord($`dns-${appName}-${resourceKey}`, args, opts);
+  new cloudflare.DnsRecord($`dns-${appName}-${resourceKey}`, args, {
+    ...opts,
+    deleteBeforeReplace: true,
+  });
 }
 
 export type BuildResultArgs = {
