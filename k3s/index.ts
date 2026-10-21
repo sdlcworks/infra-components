@@ -1364,8 +1364,9 @@ component.implement("gcloud", {
         // ForceNew VM replacement, destroying the entire k3s cluster.
         // Broadened to the entire "bootDisk" block because the GCP provider
         // normalizes nested field paths and narrower paths may not suppress
-        // the ForceNew correctly.
-        ignoreChanges: ["bootDisk"],
+        // the ForceNew correctly. "description" is ForceNew on GCE instances
+        // and is lost when a node is restored from snapshot.
+        ignoreChanges: ["bootDisk", "description"],
       });
 
       const internalIp = instance.networkInterfaces[0].networkIp;
