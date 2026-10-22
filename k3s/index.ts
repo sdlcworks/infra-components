@@ -68,6 +68,22 @@ const MachineType = z.enum([
   "n4a-highcpu-2",
   "n4a-highcpu-4",
   "n4a-highcpu-8",
+  // C4A (ARM-based, Axion)
+  "c4a-standard-1",
+  "c4a-standard-2",
+  "c4a-standard-4",
+  "c4a-standard-8",
+  "c4a-standard-16",
+  "c4a-highmem-1",
+  "c4a-highmem-2",
+  "c4a-highmem-4",
+  "c4a-highmem-8",
+  "c4a-highmem-16",
+  "c4a-highcpu-1",
+  "c4a-highcpu-2",
+  "c4a-highcpu-4",
+  "c4a-highcpu-8",
+  "c4a-highcpu-16",
   // N2 (balanced, 2nd gen Intel)
   "n2-standard-2",
   "n2-standard-4",
@@ -1348,8 +1364,9 @@ component.implement("gcloud", {
         // ForceNew VM replacement, destroying the entire k3s cluster.
         // Broadened to the entire "bootDisk" block because the GCP provider
         // normalizes nested field paths and narrower paths may not suppress
-        // the ForceNew correctly.
-        ignoreChanges: ["bootDisk"],
+        // the ForceNew correctly. "description" is ForceNew on GCE instances
+        // and is lost when a node is restored from snapshot.
+        ignoreChanges: ["bootDisk", "description"],
       });
 
       const internalIp = instance.networkInterfaces[0].networkIp;
