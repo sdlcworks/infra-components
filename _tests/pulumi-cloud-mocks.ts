@@ -11,6 +11,7 @@ import { mock } from "bun:test";
 export type CapturedResource = {
   name: string;
   args: Record<string, unknown>;
+  opts?: Record<string, unknown>;
 };
 
 export const captured: {
@@ -63,9 +64,9 @@ mock.module("@pulumi/cloudflare", () => ({
   WorkersScript: class {
     id = "worker-id";
     scriptName: unknown;
-    constructor(name: string, args: Record<string, unknown>) {
+    constructor(name: string, args: Record<string, unknown>, opts?: Record<string, unknown>) {
       this.scriptName = args.scriptName;
-      captured.workersScripts.push({ name, args });
+      captured.workersScripts.push({ name, args, opts });
     }
   },
   WorkersScriptSubdomain: class {

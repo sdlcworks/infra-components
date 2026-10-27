@@ -66,6 +66,17 @@ const DEFAULT_COMPATIBILITY_DATE = "2024-01-01";
 const DEFAULT_HTML_HANDLING = "auto-trailing-slash";
 const STATIC_SITE_NOT_FOUND_HANDLING = "404-page";
 const WORKER_ASSETS_NOT_FOUND_HANDLING = "none";
+// Release PUTs the deployed script tuple out of band; Pulumi only bootstraps it.
+const RELEASE_OWNED_SCRIPT_INPUTS = [
+  "content",
+  "contentFile",
+  "contentSha256",
+  "mainModule",
+  "assets",
+  "bindings",
+  "compatibilityDate",
+  "compatibilityFlags",
+] as const;
 const ESM_MODULE_CONTENT_TYPE = "application/javascript+module";
 const SECRET_TEXT_BINDING = "secret_text";
 
@@ -1594,7 +1605,7 @@ component.implement("cloudflare", {
           }
         : undefined,
       logpush: logpush || false,
-    }, cfOpts);
+    }, deploysContentAtRelease ? { ...cfOpts, ignoreChanges: [...RELEASE_OWNED_SCRIPT_INPUTS] } : cfOpts);
 
     const workerSubdomain = new cloudflare.WorkersScriptSubdomain($`subdomain`, {
       accountId: accountId,

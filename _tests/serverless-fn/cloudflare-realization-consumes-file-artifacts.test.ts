@@ -117,6 +117,40 @@ describe("cloudflare realization: provisioning", () => {
     expect(args.contentFile).toBeUndefined();
     expect(String(args.content)).toContain("placeholder");
   });
+
+  test("leaves the release-deployed script tuple to release in asset modes", async () => {
+    const cloudflare = (await loadServerlessFn()).default.providers.cloudflare;
+
+    for (const assetMode of ["static-site", "worker-assets"]) {
+      resetCaptured();
+      const ctx = pulumiCtx({});
+      ctx.inputs.assetMode = assetMode;
+      await cloudflare.pulumi(ctx);
+
+      expect(captured.workersScripts).toHaveLength(1);
+      expect(captured.workersScripts[0].opts?.ignoreChanges).toEqual([
+        "content",
+        "contentFile",
+        "contentSha256",
+        "mainModule",
+        "assets",
+        "bindings",
+        "compatibilityDate",
+        "compatibilityFlags",
+      ]);
+    }
+  });
+
+  test("keeps the script tuple Pulumi-owned when provision deploys the script", async () => {
+    const cloudflare = (await loadServerlessFn()).default.providers.cloudflare;
+    const scriptPath = writeScriptFile();
+
+    await cloudflare.pulumi(
+      pulumiCtx({ app: { artifact: { type: "file", uri: scriptPath } } }),
+    );
+
+    expect(captured.workersScripts[0].opts?.ignoreChanges).toBeUndefined();
+  });
 });
 
 describe("cloudflare realization: artifact updates", () => {
