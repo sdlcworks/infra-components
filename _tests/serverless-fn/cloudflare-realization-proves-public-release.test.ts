@@ -26,8 +26,10 @@ let publicStatus: number;
 let publicAddresses: {address: string; family: number}[];
 let publicCalls: {url: string; options: any}[];
 let timeoutPublic: boolean;
+let stalePublicCalls: number;
 let httpsSpy: ReturnType<typeof spyOn>;
 let dnsSpy: ReturnType<typeof spyOn>;
+let timerSpy: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "release-proof-"));
@@ -40,6 +42,10 @@ beforeEach(() => {
   timeoutPublic = false;
   publicAddresses = [{address: "104.16.1.2", family: 4}];
   publicCalls = [];
+  stalePublicCalls = 0;
+  const originalTimeout = globalThis.setTimeout;
+  timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: any, delay: number, ...args: any[]) =>
+    originalTimeout(callback, delay === 2000 ? 1 : delay === 5000 ? 5 : delay, ...args)) as any);
   originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: any, init: RequestInit = {}) => {
     const url = String(input);
@@ -67,7 +73,8 @@ beforeEach(() => {
       response.statusCode = publicStatus;
       response.resume = () => {};
       callback(response);
-      response.emit("data", Buffer.from(JSON.stringify(publicBody)));
+      const body = publicCalls.length <= stalePublicCalls ? {...WITNESS, release_identity: "previous-release"} : publicBody;
+      response.emit("data", Buffer.from(JSON.stringify(body)));
       response.emit("end");
       request.emit("close");
     }));
@@ -79,6 +86,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   httpsSpy.mockRestore();
   dnsSpy.mockRestore();
+  timerSpy.mockRestore();
   rmSync(root, {recursive:true, force:true});
 });
 
@@ -166,7 +174,7 @@ test.each([
 ])("rejects successful HTTP with wrong witness %j",async (body) => {
   publicBody=body;
   await expect(deploy()).rejects.toThrow("witness mismatch");
-  expect(publicCalls).toHaveLength(3);
+  expect(publicCalls).toHaveLength(30);
 });
 
 test.each([302,503])("does not accept HTTP %s or follow redirects",async (status) => {
@@ -182,12 +190,14 @@ test.each(["127.0.0.1","10.1.2.3","169.254.1.1","::1","::ffff:127.0.0.1","fc00::
 
 test("timed out witness cannot acknowledge deployment",async () => {
   timeoutPublic=true;
-  const originalTimeout = globalThis.setTimeout;
-  const timer = spyOn(globalThis,"setTimeout").mockImplementation(((callback: any, delay: number, ...args: any[]) => originalTimeout(callback,delay === 5000 ? 5 : delay,...args)) as any);
-  try {
-    await expect(deploy()).rejects.toThrow("witness timeout");
-    expect(publicCalls).toHaveLength(3);
-  } finally { timer.mockRestore(); }
+  await expect(deploy()).rejects.toThrow("witness timeout");
+  expect(publicCalls).toHaveLength(30);
+});
+
+test("a release still propagating to the edge is acknowledged once its witness is served",async () => {
+  stalePublicCalls=6;
+  await deploy();
+  expect(publicCalls).toHaveLength(7);
 });
 
 test.each(["static-site", "worker-assets"])("proof reserves only witness routing for %s",async (mode) => {
