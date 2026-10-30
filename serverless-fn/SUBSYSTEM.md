@@ -26,6 +26,10 @@ definition: >
   this proof election retain their previous deployment behaviour but cannot
   claim witnessed public delivery. Legacy retained resources may acquire the
   election through an ordinary reviewed declaration without changing identity.
+  A release serving from an asset root may declare response headers and
+  redirects at that root. They are applied to the release's asset responses,
+  never served as content, and forwarded unaltered; malformed declarations
+  refuse the release. Their absence leaves serving configuration unchanged.
 inputs:
   - name: function-fleet-intent
     description: >
@@ -40,6 +44,10 @@ inputs:
       Exact selected application code content and its release identity, with
       the authored deployment configuration and any public-proof election.
       They identify the bytes and release that deployment must actually serve.
+      A release serving from an asset root may carry response-header and
+      redirect declarations at that root; they configure asset responses,
+      are never served as content, and are forwarded unaltered. Their absence
+      leaves serving configuration unchanged.
   - name: publication-intent
     description: >
       Reviewed public name and exact route meaning for the allocated function,
@@ -59,6 +67,9 @@ outputs:
       The allocated function's public endpoint and request-host semantics.
       When public-release proof is elected, successful deployment attests that
       this exact public address served the selected release and artifact content.
+      Asset responses carry the response headers and redirects the release
+      declared at its asset root, unaltered; without such declarations they
+      are served as before.
   - name: function-fleet-identity
     description: >
       Credential-free retained function identities and endpoints for environment

@@ -371,16 +371,52 @@ function extractArtifact(artifactPath: string, prefix: string): string {
   return dir;
 }
 
+const ASSET_ROOT_RULE_FILES = ["_headers", "_redirects"] as const;
+
+type AssetRootRules = Partial<Record<(typeof ASSET_ROOT_RULE_FILES)[number], string>>;
+
+function isRuleUrlLine(line: string): boolean {
+  return line.startsWith("/") || /^https?:\/\//i.test(line);
+}
+
+function assetRootRules(root: string): AssetRootRules {
+  const rules: AssetRootRules = {};
+  for (const name of ASSET_ROOT_RULE_FILES) {
+    const file = join(root, name);
+    if (!existsSync(file) || !statSync(file).isFile()) continue;
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(file));
+    } catch {
+      throw new Error(`serverless-fn(cloudflare): asset root ${name} is not valid UTF-8`);
+    }
+    if (name === "_headers") {
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (line === "" || line.startsWith("#")) continue;
+        if (isRuleUrlLine(line)) break;
+        throw new Error(
+          `serverless-fn(cloudflare): asset root _headers declares a header before any URL line: '${line}'`,
+        );
+      }
+    }
+    rules[name] = text;
+  }
+  return rules;
+}
+
 function assetsMetadata(
   settings: ScriptSettings,
   jwt: string,
   notFoundDefault: string,
-): { jwt: string; config: { html_handling: string; not_found_handling: string } } {
+  rules: AssetRootRules,
+): { jwt: string; config: Record<string, string> } {
   return {
     jwt,
     config: {
       html_handling: settings.assets?.html_handling ?? DEFAULT_HTML_HANDLING,
       not_found_handling: settings.assets?.not_found_handling ?? notFoundDefault,
+      ...rules,
     },
   };
 }
@@ -390,8 +426,12 @@ async function uploadAssetManifest(
   scriptName: string,
   apiToken: string,
   distDir: string,
+  rules: AssetRootRules,
 ): Promise<string> {
-  const files = walkFiles(distDir);
+  const ruleFiles = Object.keys(rules);
+  const files = walkFiles(distDir).filter(
+    (file) => !ruleFiles.includes(relative(distDir, file)),
+  );
   const byHash = new Map<string, { path: string; content: Buffer }>();
   const manifest: Record<string, { hash: string; size: number }> = {};
 
@@ -533,11 +573,13 @@ async function deployScript(args: DeployArgs): Promise<void> {
 
 async function deployStaticSite(args: DeployArgs): Promise<void> {
   const distDir = extractArtifact(args.artifactPath, "sdlc-static-site-");
+  const rules = assetRootRules(distDir);
   const jwt = await uploadAssetManifest(
     args.accountId,
     args.scriptName,
     args.apiToken,
     distDir,
+    rules,
   );
   await putWorkerScript(
     args.accountId,
@@ -546,7 +588,7 @@ async function deployStaticSite(args: DeployArgs): Promise<void> {
     {
       ...baseMetadata(args.settings),
       bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
-      assets: assetsMetadata(args.settings, jwt, STATIC_SITE_NOT_FOUND_HANDLING),
+      assets: assetsMetadata(args.settings, jwt, STATIC_SITE_NOT_FOUND_HANDLING, rules),
     },
     [
       {
@@ -578,11 +620,13 @@ async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
     content: readFileSync(file),
     contentType: workerModuleContentType(file),
   }));
+  const rules = assetRootRules(assetsDir);
   const jwt = await uploadAssetManifest(
     args.accountId,
     args.scriptName,
     args.apiToken,
     assetsDir,
+    rules,
   );
   await putWorkerScript(
     args.accountId,
@@ -591,7 +635,7 @@ async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
     {
       ...baseMetadata(args.settings),
       bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
-      assets: assetsMetadata(args.settings, jwt, WORKER_ASSETS_NOT_FOUND_HANDLING),
+      assets: assetsMetadata(args.settings, jwt, WORKER_ASSETS_NOT_FOUND_HANDLING, rules),
     },
     modules,
     args.witness,
