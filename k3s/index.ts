@@ -381,6 +381,43 @@ const AutoscalingSchema = z.object({
   targetMemoryUtilizationPercentage: z.number().int().min(1).max(100).optional(),
 });
 
+const ConfinementSchema = z.object({
+  hostUsers: z
+    .boolean()
+    .optional()
+    .describe(
+      "Pod-level user-namespace isolation; false maps pod UIDs away from host UIDs",
+    ),
+  procMount: z.enum(["Default", "Unmasked"]).optional(),
+  appArmorLocalhostProfile: z
+    .string()
+    .optional()
+    .describe(
+      "Name of an AppArmor profile pre-installed on the node (Localhost type)",
+    ),
+});
+type ConfinementConfig = z.infer<typeof ConfinementSchema>;
+
+function buildContainerSecurityContext(confinement?: ConfinementConfig) {
+  if (
+    !confinement ||
+    (confinement.procMount === undefined &&
+      confinement.appArmorLocalhostProfile === undefined)
+  ) {
+    return undefined;
+  }
+  return {
+    privileged: false,
+    procMount: confinement.procMount,
+    appArmorProfile: confinement.appArmorLocalhostProfile
+      ? {
+          type: "Localhost",
+          localhostProfile: confinement.appArmorLocalhostProfile,
+        }
+      : undefined,
+  };
+}
+
 const DeploymentConfigSchema = z.object({
   workloadType: z.literal("deployment"),
   ...CommonWorkloadFields,
@@ -405,6 +442,11 @@ const DeploymentConfigSchema = z.object({
 
   // Seconds to wait for graceful shutdown before force-killing the pod.
   terminationGracePeriodSeconds: z.number().int().min(0).default(30),
+
+  // Sandbox confinement for workloads that nest their own sandboxes
+  // (user namespaces + AppArmor); the named profile must already be
+  // installed on the node.
+  confinement: ConfinementSchema.optional(),
 });
 
 const StatefulSetConfigSchema = z.object({
@@ -4805,6 +4847,7 @@ function buildDeployment({
         template: {
           metadata: { labels: appLabels },
           spec: {
+            hostUsers: config.confinement?.hostUsers,
             terminationGracePeriodSeconds: config.terminationGracePeriodSeconds,
             serviceAccountName: config.serviceAccountName,
             nodeSelector: resolveNodeSelector(config),
@@ -4833,6 +4876,9 @@ function buildDeployment({
                 args: config.args,
                 resources: buildResources(effectiveLimits, effectiveRequests),
                 volumeMounts: config.volumeMounts,
+                securityContext: buildContainerSecurityContext(
+                  config.confinement,
+                ),
                 livenessProbe: config.livenessProbe
                   ? buildProbe(config.livenessProbe)
                   : undefined,
