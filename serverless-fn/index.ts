@@ -1551,7 +1551,7 @@ component.implement("cloudflare", {
       })),
       ...(cfBindings?.d1 || []).map((binding) => ({
         name: binding.name,
-        databaseId: binding.databaseId,
+        id: binding.databaseId,
         type: "d1" as const,
       })),
       ...(cfBindings?.queues || []).map((binding) => ({

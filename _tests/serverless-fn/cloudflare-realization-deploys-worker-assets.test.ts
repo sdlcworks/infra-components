@@ -192,6 +192,7 @@ describe("cloudflare realization: worker-assets provisioning", () => {
       text: DATABASE_URL,
       type: "secret_text",
     });
+    expect(bindings).toContainEqual({ name: "DB", id: "d1-id", type: "d1" });
     expect(ctx.state.scriptSettings.secret_refs).toEqual([
       { name: "DATABASE_URL", secret_name: "DATABASE_URL" },
     ]);
