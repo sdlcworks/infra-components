@@ -15,6 +15,7 @@ Users reference this repo as an infra source in their SDLC project configuration
 | `aws-ecs/` | AWS ECS Fargate service fleet with reviewed scaling, discovery, exposure, and deployment posture |
 | `aws-gwlb/` | AWS Gateway Load Balancer with endpoint-service and route-edit management |
 | `aws-lambda/` | AWS Lambda function fleet with deploy-time code updates |
+| `aws-rds/` | AWS RDS Postgres or MySQL instances with closed network admission, storage autoscaling, backups, final snapshots, deletion protection, read replicas, parameter groups and a Secrets Manager copy of the credential |
 | `aws-lb/` | AWS Application / Network Load Balancer with listeners, target groups, and explicit ingress |
 | `aws-s3/` | AWS S3 bucket with permanent non-public posture and infra-addressable identity |
 | `aws-tgw/` | AWS Transit Gateway hub with attachments, route tables, propagation, and return routes |
@@ -28,8 +29,9 @@ Users reference this repo as an infra source in their SDLC project configuration
 | `firewall/` | GCP firewall rules |
 | `http-lb-external/` | GCP external HTTP(S) load balancer |
 | `bucket/` | GCP Cloud Storage / Cloudflare R2 / AWS S3 bucket |
-| `serverless-fn/` | GCP Cloud Run service + Cloudflare Workers |
+| `serverless-fn/` | GCP Cloud Run service (traffic, public access, dedicated identity, Direct VPC egress, Cloud SQL connector, Secret Manager variables, timeout, health check) + Cloudflare Workers |
 | `cloudjob/` | GCP Cloud Run Job |
+| `cloud-sql/` | GCP Cloud SQL Postgres or MySQL with per-instance size, storage, high availability, connector-only, private or allow-listed networking, backups, maintenance, Query Insights, flags, read replicas and deletion protection; each app gets its own database, user and generated password |
 | `cloudflare-d1/` | Cloudflare D1 database |
 | `sandbox-host/` | e2b sandbox serving host: runs released workspace processes inside the developer's sandbox and records their public endpoints |
 

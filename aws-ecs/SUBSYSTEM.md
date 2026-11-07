@@ -76,6 +76,10 @@ inputs:
     description: >
       App-boundary declaration mapping each app onto exactly one existing
       service; injective, reviewed, and consumed by deployment and connection.
+  - name: database-access
+    description: >
+      Optional credentialed connection meaning from a relational or document
+      data store, delivered to the app's configuration at deployment.
 
 outputs:
   - name: workload-target-identity

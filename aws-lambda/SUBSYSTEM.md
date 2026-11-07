@@ -38,6 +38,10 @@ inputs:
     description: >
       App-boundary declaration mapping each app onto exactly one existing function;
       injective, reviewed, and consumed by deployment and connection.
+  - name: database-access
+    description: >
+      Optional credentialed connection meaning from a relational or document
+      data store, delivered to the app's configuration at deployment.
 
 outputs:
   - name: target-identity
@@ -55,4 +59,8 @@ outputs:
   - name: function-fleet-identity
     description: >
       Environment-visible identities and endpoints of the provisioned functions.
+  - name: fleet-network-identity
+    description: >
+      Network identity of privately placed functions, emitted when the fleet
+      owns it, so a data store can admit exactly these functions.
 ---

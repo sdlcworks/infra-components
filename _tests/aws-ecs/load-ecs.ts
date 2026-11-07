@@ -5,6 +5,9 @@ mock.module("@pulumi/pulumi", () => ({}));
 mock.module("../../_internal/interfaces", () => ({
   InternalServiceCI: {},
   PublicCI: {},
+  PostgresCI: {},
+  MysqlCI: {},
+  MongoCI: {},
 }));
 
 let componentDefinition: unknown;

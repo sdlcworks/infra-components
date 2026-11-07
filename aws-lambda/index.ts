@@ -27,7 +27,12 @@ import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import { z } from "zod";
 
-import { PublicCI } from "../_internal/interfaces";
+import {
+  MongoCI,
+  MysqlCI,
+  PostgresCI,
+  PublicCI,
+} from "../_internal/interfaces";
 
 const LAMBDA_SERVICE_PRINCIPAL = "lambda.amazonaws.com";
 const BASIC_EXECUTION_POLICY_ARN =
@@ -58,6 +63,11 @@ const PACKAGING_FINGERPRINT_ERROR_MESSAGE =
   "Changing a function packaging mode would replace the Lambda function and churn provision-time identities. Create a new function key and migrate traffic explicitly.";
 const ECR_DIRECT_ERROR =
   "image artifacts must be published through a same-account, same-region ECR-backed artifact registry (`aws-ecr`)";
+const MANAGED_DESCRIPTION = "Managed by sdlc.works aws-lambda component";
+const ALL_PROTOCOLS = "-1";
+const ANY_PORT = 0;
+const IPV4_ANY_CIDR = "0.0.0.0/0";
+const IPV6_ANY_CIDR = "::/0";
 
 const PackagingSchema = z.enum(["image", "zip"]);
 const ArchitectureSchema = z.enum(["x86_64", "arm64"]);
@@ -211,6 +221,21 @@ const component = new InfraComponent({
       description: "public Lambda function URL for a mapped app function",
       interface: PublicCI,
     },
+    postgres: {
+      description:
+        "consumer-side: a Lambda function connects to a Postgres database",
+      interface: PostgresCI,
+    },
+    mysql: {
+      description:
+        "consumer-side: a Lambda function connects to a MySQL database",
+      interface: MysqlCI,
+    },
+    mongodb: {
+      description:
+        "consumer-side: a Lambda function connects to a MongoDB database",
+      interface: MongoCI,
+    },
   } as const,
   connectionInterfaces: [PublicCI],
   configSchema: ConfigSchema,
@@ -222,6 +247,7 @@ const component = new InfraComponent({
     functionNames: z.record(z.string(), z.string()),
     functionArns: z.record(z.string(), z.string()),
     functionUrls: z.record(z.string(), z.string()),
+    securityGroupId: z.string().optional(),
   }),
 });
 
@@ -245,6 +271,12 @@ function inlinePolicyDocument(statements: Array<Record<string, any>>): string {
     Version: "2012-10-17",
     Statement: statements,
   });
+}
+
+export function declaresOwnSecurityGroups(
+  vpcConfig: { securityGroupIds?: string[] } | undefined,
+): boolean {
+  return (vpcConfig?.securityGroupIds?.length ?? 0) > 0;
 }
 
 function packagingFingerprint(fn: FunctionConfig): string {
@@ -597,6 +629,42 @@ component.implement("aws", {
 
     const caller = aws.getCallerIdentityOutput({}, awsOpts);
     const region = aws.getRegionOutput({}, awsOpts).name;
+    const managedSecurityGroup =
+      config.vpcConfig && !declaresOwnSecurityGroups(config.vpcConfig)
+        ? new aws.ec2.SecurityGroup(
+            $`sg`,
+            {
+              name: $`sg`,
+              description: MANAGED_DESCRIPTION,
+              vpcId: aws.ec2.getSubnetOutput(
+                { id: config.vpcConfig.subnetIds[0] },
+                awsOpts,
+              ).vpcId,
+              ingress: [],
+              egress: [
+                {
+                  protocol: ALL_PROTOCOLS,
+                  fromPort: ANY_PORT,
+                  toPort: ANY_PORT,
+                  cidrBlocks: [IPV4_ANY_CIDR],
+                  ipv6CidrBlocks: [IPV6_ANY_CIDR],
+                },
+              ],
+              revokeRulesOnDelete: true,
+              tags: {
+                ...config.labels,
+                Name: $`sg`,
+              },
+            },
+            awsOpts,
+        )
+        : undefined;
+    const vpcSecurityGroupIds: pulumi.Input<string>[] | undefined =
+      config.vpcConfig === undefined
+        ? undefined
+        : declaresOwnSecurityGroups(config.vpcConfig)
+          ? config.vpcConfig.securityGroupIds!
+          : [managedSecurityGroup!.id];
     const role =
       config.executionRoleArn === undefined
         ? new aws.iam.Role(
@@ -720,7 +788,7 @@ component.implement("aws", {
           vpcConfig: config.vpcConfig
             ? {
                 subnetIds: config.vpcConfig.subnetIds,
-                securityGroupIds: config.vpcConfig.securityGroupIds ?? [],
+                securityGroupIds: vpcSecurityGroupIds!,
               }
             : undefined,
           handler: fn.packaging === "zip" ? fn.handler : undefined,
@@ -797,6 +865,7 @@ component.implement("aws", {
       functionNames: pulumi.output(functionNames),
       functionArns: pulumi.output(functionArns),
       functionUrls: pulumi.output(functionUrls),
+      securityGroupId: pulumi.output(managedSecurityGroup?.id),
     };
   },
 

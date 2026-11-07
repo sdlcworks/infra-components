@@ -27,7 +27,13 @@ import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import { z } from "zod";
 
-import { InternalServiceCI, PublicCI } from "../_internal/interfaces";
+import {
+  InternalServiceCI,
+  MongoCI,
+  MysqlCI,
+  PostgresCI,
+  PublicCI,
+} from "../_internal/interfaces";
 
 const ECS_TASKS_SERVICE_PRINCIPAL = "ecs-tasks.amazonaws.com";
 const ECS_SERVICE_PRINCIPAL = "ecs.amazonaws.com";
@@ -377,6 +383,20 @@ const component = new InfraComponent({
     internal: {
       description: "internal Service Connect endpoint for an ECS service",
       interface: InternalServiceCI,
+    },
+    postgres: {
+      description:
+        "consumer-side: an ECS service connects to a Postgres database",
+      interface: PostgresCI,
+    },
+    mysql: {
+      description: "consumer-side: an ECS service connects to a MySQL database",
+      interface: MysqlCI,
+    },
+    mongodb: {
+      description:
+        "consumer-side: an ECS service connects to a MongoDB database",
+      interface: MongoCI,
     },
   } as const,
   connectionInterfaces: [PublicCI, InternalServiceCI],
