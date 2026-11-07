@@ -449,7 +449,7 @@ component.implement("gcloud", {
       { additionalSecretOutputs: ["password"] },
     );
 
-    allocations[name] = { instanceKey: request.instance, dbName, dbUser, password };
+    allocations[name] = { instanceKey: request.instance, dbName, dbUser, password: pulumi.secret(password) as unknown as string };
   },
 
   connect: (({ state, selfComponentName }: any) => {
@@ -467,7 +467,9 @@ component.implement("gcloud", {
           `cloud-sql: "${selfComponentName}" connects as ${engine} but instance "${allocation.instanceKey}" runs ${instance.engine}`,
         );
       }
-      const result = resolved(instance).apply((value) => connectionResult(value as SqlInstanceState, allocation));
+      const result = pulumi
+        .all([resolved(instance), resolved(allocation)])
+        .apply(([value, owned]) => connectionResult(value as SqlInstanceState, owned as AllocationState));
       const field = <K extends keyof ReturnType<typeof connectionResult>>(key: K) => result.apply((value) => value[key]);
       const uri = pulumi.secret(field("uri"));
       const metadata = {

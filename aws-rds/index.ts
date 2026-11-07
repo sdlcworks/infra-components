@@ -728,7 +728,7 @@ component.implement("aws", {
         engine: instance.engine,
         databaseName: instance.databaseName,
         masterUsername: instance.masterUsername,
-        password,
+        password: pulumi.secret(password) as unknown as string,
         secretArn,
         replicaEndpoints,
       };
