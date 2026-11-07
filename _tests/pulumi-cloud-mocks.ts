@@ -21,6 +21,7 @@ export const captured: {
   cloudflareProviders: CapturedResource[];
   dnsRecords: CapturedResource[];
   workerCustomDomains: CapturedResource[];
+  gcpResources: (CapturedResource & { kind: string })[];
 } = {
   workersScripts: [],
   workersSubdomains: [],
@@ -28,6 +29,7 @@ export const captured: {
   cloudflareProviders: [],
   dnsRecords: [],
   workerCustomDomains: [],
+  gcpResources: [],
 };
 
 export function resetCaptured(): void {
@@ -91,21 +93,26 @@ class GcpResource {
   location = "us-central1";
   selfLink = "https://gcp.example/self-link";
   privateKey = "key-json";
-  constructor(name: string, args: Record<string, unknown>) {
+  constructor(name: string, args: Record<string, unknown>, opts?: Record<string, unknown>) {
     this.name = name;
+    captured.gcpResources.push({ kind: new.target.name, name, args, opts });
     if (name.includes("service")) {
-      captured.cloudRunServices.push({ name, args });
+      captured.cloudRunServices.push({ name, args, opts });
     }
   }
 }
 
+const gcpKind = (kind: string) => ({ [kind]: class extends GcpResource {} })[kind];
+
 mock.module("@pulumi/gcp", () => ({
-  serviceaccount: { Account: GcpResource, Key: GcpResource },
-  cloudrunv2: { Service: GcpResource, ServiceIamMember: GcpResource },
+  serviceaccount: { Account: gcpKind("Account"), Key: gcpKind("Key") },
+  cloudrunv2: { Service: gcpKind("Service"), ServiceIamMember: gcpKind("ServiceIamMember") },
   compute: {
-    RegionNetworkEndpointGroup: GcpResource,
-    BackendService: GcpResource,
+    RegionNetworkEndpointGroup: gcpKind("RegionNetworkEndpointGroup"),
+    BackendService: gcpKind("BackendService"),
   },
+  projects: { IAMMember: gcpKind("IAMMember") },
+  secretmanager: { SecretIamMember: gcpKind("SecretIamMember") },
 }));
 
 mock.module("../_internal/gcp-helpers", () => ({

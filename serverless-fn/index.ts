@@ -774,7 +774,146 @@ const AllocationSchema = z.object({
   region: z.string(),
   serviceUri: z.string(),
   ingressHosts: z.array(z.string()).default([]),
+  serviceAccountEmail: z.string().optional(),
 });
+
+const CloudRunIdentitySchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("default") }).strict(),
+  z.object({ mode: z.literal("dedicated") }).strict(),
+  z.object({ mode: z.literal("existing"), email: z.string().email() }).strict(),
+]);
+
+export const HttpServiceSchema = z.object({
+  publicReleaseProof: PublicReleaseProofSchema.optional(),
+  service: z.string().optional(),
+  region: z.string().default("us-central1"),
+  containerPort: z.number().default(8080),
+  cpu: z.string().default("1"),
+  memory: z.string().default("512Mi"),
+  minInstances: z.number().min(0).default(0),
+  maxInstances: z.number().min(1).default(100),
+  concurrency: z.number().min(1).optional(),
+  cpuIdle: z.boolean().default(true),
+  startupCpuBoost: z.boolean().default(true),
+  ingress: z.object({
+    rules: z.array(IngressRuleSchema).default([]),
+  }).optional(),
+  traffic: z.enum(["all", "internal", "internal-and-cloud-load-balancing"]).default("all"),
+  public: z.boolean().default(true),
+  identity: CloudRunIdentitySchema.optional(),
+  vpcAccess: z
+    .object({
+      network: z.string().optional(),
+      subnetwork: z.string().min(1),
+      egress: z.enum(["private-ranges-only", "all-traffic"]).default("private-ranges-only"),
+    })
+    .strict()
+    .optional(),
+  cloudSqlInstances: z.array(z.string().regex(/^[^:]+:[^:]+:[^:]+$/)).default([]),
+  secretEnvironmentVariables: z
+    .array(z.object({ name: z.string().min(1), secret: z.string().min(1), version: z.string().default("latest") }).strict())
+    .default([]),
+  timeoutSeconds: z.number().int().min(1).max(3600).default(300),
+  executionEnvironment: z.enum(["gen1", "gen2"]).optional(),
+  healthCheckPath: z.string().startsWith("/").optional(),
+  labels: z.record(z.string(), z.string()).default({}),
+});
+
+export type HttpService = z.infer<typeof HttpServiceSchema>;
+
+const INGRESS_FOR_TRAFFIC: Record<HttpService["traffic"], string> = {
+  all: "INGRESS_TRAFFIC_ALL",
+  internal: "INGRESS_TRAFFIC_INTERNAL_ONLY",
+  "internal-and-cloud-load-balancing": "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER",
+};
+
+const CLOUD_SQL_VOLUME = "cloudsql";
+const CLOUD_SQL_MOUNT = "/cloudsql";
+
+export function resolvedIdentity(spec: HttpService): z.infer<typeof CloudRunIdentitySchema> {
+  const needsGrants = spec.cloudSqlInstances.length > 0 || spec.secretEnvironmentVariables.length > 0;
+  const identity = spec.identity ?? (needsGrants ? { mode: "dedicated" as const } : { mode: "default" as const });
+  if (identity.mode === "default" && needsGrants) {
+    throw new Error(
+      "serverless-fn(gcloud): Cloud SQL instances and secrets need a service identity that can be granted access; use identity mode \"dedicated\" or \"existing\"",
+    );
+  }
+  return identity;
+}
+
+export function serviceAccountIdFor(resourceName: string): string {
+  return `run-${createHash("sha256").update(resourceName).digest("hex").slice(0, 16)}`;
+}
+
+export function cloudRunTemplate(
+  spec: HttpService,
+  image: string,
+  env: Record<string, string>,
+  serviceAccount: pulumi.Input<string> | undefined,
+) {
+  const cpuFractional = parseFloat(spec.cpu) < 1;
+  const plainEnv = Object.entries(env)
+    .filter(([key]) => !spec.secretEnvironmentVariables.some((secret) => secret.name === key))
+    .map(([name, value]) => ({ name, value }));
+  const secretEnv = spec.secretEnvironmentVariables.map((secret) => ({
+    name: secret.name,
+    valueSource: { secretKeyRef: { secret: secret.secret, version: secret.version } },
+  }));
+  const envs = [...plainEnv, ...secretEnv];
+  const usesCloudSql = spec.cloudSqlInstances.length > 0;
+  return {
+    serviceAccount,
+    timeout: `${spec.timeoutSeconds}s`,
+    executionEnvironment: spec.executionEnvironment
+      ? `EXECUTION_ENVIRONMENT_${spec.executionEnvironment.toUpperCase()}`
+      : undefined,
+    maxInstanceRequestConcurrency: spec.concurrency,
+    scaling: { minInstanceCount: spec.minInstances, maxInstanceCount: spec.maxInstances },
+    vpcAccess: spec.vpcAccess
+      ? {
+          networkInterfaces: [{ network: spec.vpcAccess.network, subnetwork: spec.vpcAccess.subnetwork }],
+          egress: spec.vpcAccess.egress === "all-traffic" ? "ALL_TRAFFIC" : "PRIVATE_RANGES_ONLY",
+        }
+      : undefined,
+    volumes: usesCloudSql
+      ? [{ name: CLOUD_SQL_VOLUME, cloudSqlInstance: { instances: spec.cloudSqlInstances } }]
+      : undefined,
+    containers: [
+      {
+        image,
+        resources: {
+          limits: { cpu: spec.cpu, memory: spec.memory },
+          cpuIdle: cpuFractional || spec.cpuIdle,
+          startupCpuBoost: cpuFractional ? false : spec.startupCpuBoost,
+        },
+        ports: { name: "http1", containerPort: spec.containerPort },
+        envs: envs.length > 0 ? envs : undefined,
+        volumeMounts: usesCloudSql ? [{ name: CLOUD_SQL_VOLUME, mountPath: CLOUD_SQL_MOUNT }] : undefined,
+        startupProbe: spec.healthCheckPath
+          ? { httpGet: { path: spec.healthCheckPath, port: spec.containerPort } }
+          : undefined,
+      },
+    ],
+  };
+}
+
+type RunEnv = { name: string; value?: string; valueSource?: unknown };
+
+export function redeployedTemplate<T extends { containers?: Array<Record<string, unknown>> }>(
+  template: T,
+  image: string,
+  env: Record<string, string>,
+): T {
+  const { revision: _revision, ...reusable } = template as T & { revision?: unknown };
+  const [first = {}, ...rest] = template.containers ?? [];
+  const existing = (first.env ?? []) as RunEnv[];
+  const kept = existing.filter((entry) => entry.valueSource !== undefined);
+  const secretNames = new Set(kept.map((entry) => entry.name));
+  const plain = Object.entries(env)
+    .filter(([name]) => !secretNames.has(name))
+    .map(([name, value]) => ({ name, value }));
+  return { ...reusable, containers: [{ ...first, image, env: [...kept, ...plain] }, ...rest] } as T;
+}
 
 
 const component = new InfraComponent({
@@ -877,22 +1016,7 @@ const component = new InfraComponent({
       .optional(),
   }),
   appComponentTypes: {
-    "http-service": z.object({
-      publicReleaseProof: PublicReleaseProofSchema.optional(),
-      service: z.string().optional(),
-      region: z.string().default("us-central1"),
-      containerPort: z.number().default(8080),
-      cpu: z.string().default("1"),
-      memory: z.string().default("512Mi"),
-      minInstances: z.number().min(0).default(0),
-      maxInstances: z.number().min(1).default(100),
-      concurrency: z.number().min(1).optional(),
-      cpuIdle: z.boolean().default(true),
-      startupCpuBoost: z.boolean().default(true),
-      ingress: z.object({
-        rules: z.array(IngressRuleSchema).default([]),
-      }).optional(),
-    }),
+    "http-service": HttpServiceSchema,
     "default": z.object({ publicReleaseProof: PublicReleaseProofSchema.optional() }),
   },
   outputSchema: z.object({
@@ -1141,24 +1265,10 @@ component.implement("gcloud", {
     $,
     buildArtifact,
     envStore,
-    gcp: gcpProvider,
   }) => {
-    const region: string = deploymentConfig.region ?? "us-central1";
-    const containerPort: number = deploymentConfig.containerPort ?? 8080;
-    const cpu: string = deploymentConfig.cpu ?? "1";
-    const memory: string = deploymentConfig.memory ?? "512Mi";
-    const minInstances: number = deploymentConfig.minInstances ?? 0;
-    const maxInstances: number = deploymentConfig.maxInstances ?? 100;
-    const concurrency: number | undefined = deploymentConfig.concurrency;
-    const cpuIdle: boolean = deploymentConfig.cpuIdle ?? true;
-    const startupCpuBoost: boolean = deploymentConfig.startupCpuBoost ?? true;
-    const ingress = deploymentConfig.ingress as
-      | { rules?: Array<{ host: string; path: string }> }
-      | undefined;
-
-    const gcpOpts: pulumi.CustomResourceOptions = gcpProvider
-      ? { provider: gcpProvider }
-      : {};
+    const spec = HttpServiceSchema.parse(deploymentConfig ?? {});
+    const region = spec.region;
+    const project = (state as any).project as string | undefined;
 
     if (
       buildArtifact &&
@@ -1175,58 +1285,59 @@ component.implement("gcloud", {
       "us-docker.pkg.dev/cloudrun/container/hello";
 
     const envForComponent = (envStore?.[name] ?? {}) as Record<string, string>;
-    const envEntries = Object.entries(envForComponent).map(([k, v]) => ({
-      name: k,
-      value: v,
-    }));
+    const identity = resolvedIdentity(spec);
 
-    const cpuFractional = parseFloat(cpu) < 1;
-    const effectiveCpuIdle = cpuFractional || cpuIdle;
-    const effectiveStartupCpuBoost = cpuFractional ? false : startupCpuBoost;
+    let serviceAccountEmail: pulumi.Input<string> | undefined;
+    if (identity.mode === "dedicated") {
+      const account = new gcp.serviceaccount.Account($`run-sa-${name}`, {
+        accountId: serviceAccountIdFor($`run-sa-${name}`),
+        displayName: `Cloud Run identity for ${name}`,
+      });
+      serviceAccountEmail = account.email;
+    } else if (identity.mode === "existing") {
+      serviceAccountEmail = identity.email;
+    }
+
+    const grants: pulumi.Resource[] = [];
+    if (serviceAccountEmail !== undefined) {
+      const member = pulumi.interpolate`serviceAccount:${serviceAccountEmail}`;
+      if (spec.cloudSqlInstances.length > 0) {
+        if (!project) {
+          throw new Error("serverless-fn(gcloud): Cloud SQL access needs the project id from the gcloud credential");
+        }
+        grants.push(new gcp.projects.IAMMember($`cloudsql-client-${name}`, { project, role: "roles/cloudsql.client", member }));
+      }
+      for (const secret of spec.secretEnvironmentVariables) {
+        grants.push(
+          new gcp.secretmanager.SecretIamMember($`secret-access-${name}-${secret.name.toLowerCase()}`, {
+            project,
+            secretId: secret.secret,
+            role: "roles/secretmanager.secretAccessor",
+            member,
+          }),
+        );
+      }
+    }
 
     const service = new gcp.cloudrunv2.Service(
       $`service-${name}`,
       {
         location: region,
-        ingress: "INGRESS_TRAFFIC_ALL",
-        template: {
-          maxInstanceRequestConcurrency: concurrency as any,
-          scaling: {
-            minInstanceCount: minInstances,
-            maxInstanceCount: maxInstances,
-          },
-          containers: [
-            {
-              image: containerImage,
-              resources: {
-                limits: { cpu, memory },
-                cpuIdle: effectiveCpuIdle,
-                startupCpuBoost: effectiveStartupCpuBoost,
-              },
-              ports: {
-                name: "http1",
-                containerPort,
-              } as any,
-              envs: envEntries.length > 0 ? envEntries : undefined,
-            },
-          ],
-        },
+        ingress: INGRESS_FOR_TRAFFIC[spec.traffic],
+        labels: Object.keys(spec.labels).length > 0 ? spec.labels : undefined,
+        template: cloudRunTemplate(spec, containerImage, envForComponent, serviceAccountEmail) as any,
       },
-      gcpOpts,
+      grants.length > 0 ? { dependsOn: grants } : undefined,
     );
 
-    new gcp.cloudrunv2.ServiceIamMember(
-      $`public-invoker-${name}`,
-      {
+    if (spec.public) {
+      new gcp.cloudrunv2.ServiceIamMember($`public-invoker-${name}`, {
         location: region,
         name: service.name,
         role: "roles/run.invoker",
         member: "allUsers",
-      },
-      gcpOpts,
-    );
-
-    const ingressHosts = (ingress?.rules ?? []).map((r) => r.host);
+      });
+    }
 
     if (!(state as any).allocations) {
       (state as any).allocations = {};
@@ -1235,7 +1346,8 @@ component.implement("gcloud", {
       serviceName: service.name,
       region,
       serviceUri: service.uri,
-      ingressHosts,
+      ingressHosts: (spec.ingress?.rules ?? []).map((rule) => rule.host),
+      serviceAccountEmail,
     };
   },
 
@@ -1361,35 +1473,31 @@ component.implement("gcloud", {
 
       const { serviceName, region } = allocation;
       const imageUri = artifactInfo.artifact.uri;
-      const envForComponent = envStore[componentName] ?? {};
-      const envEntries = Object.entries(envForComponent).map(([k, v]) => ({
-        name: k,
-        value: v,
-      }));
+      const envForComponent = (envStore[componentName] ?? {}) as Record<string, string>;
 
       console.error(
         `Deploying ${imageUri} → serverless-fn/${serviceName} in ${region} ` +
           `(env keys: ${Object.keys(envForComponent).join(", ") || "<none>"})`,
       );
 
-      const url =
-        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}` +
-        `?updateMask=template`;
-      const patchRes = await fetch(url, {
+      const serviceUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`;
+      const currentRes = await fetch(serviceUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!currentRes.ok) {
+        throw new Error(
+          `serverless-fn(gcloud): failed to read service '${serviceName}' (${currentRes.status}): ${await currentRes.text()}`,
+        );
+      }
+      const current = (await currentRes.json()) as { template?: Record<string, unknown> };
+      const patchRes = await fetch(`${serviceUrl}?updateMask=template`, {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          template: {
-            containers: [
-              {
-                image: imageUri,
-                env: envEntries,
-              },
-            ],
-          },
+          template: redeployedTemplate((current.template ?? {}) as any, imageUri, envForComponent),
         }),
       });
 

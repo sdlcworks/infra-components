@@ -64,7 +64,7 @@ const MULTIPART_BOUNDARY = "==SDLC_MULTIPART_BOUNDARY==";
 const FirewallRuleSchema = z.object({
   direction: z.enum(["in", "out"]).describe(
     'Traffic direction. "in" = ingress, "out" = egress. ' +
-      "GCloud: only ingress rules supported; egress rules silently ignored. " +
+      "GCloud: one firewall rule per entry, ingress and egress. " +
       "AWS: ingress and egress split into separate Security Group rule sets.",
   ),
   protocol: z.string().describe(
@@ -83,7 +83,7 @@ const FirewallRuleSchema = z.object({
     .optional()
     .describe(
       'Source CIDRs for ingress rules. Example: ["0.0.0.0/0", "::/0"]. ' +
-        "Hetzner: maps to sourceIps. GCloud: aggregated across rules. AWS: maps to cidrBlocks.",
+        "Hetzner: maps to sourceIps. GCloud: applies to this rule only. AWS: maps to cidrBlocks.",
     ),
   destinationRanges: z
     .array(z.string())
@@ -94,6 +94,29 @@ const FirewallRuleSchema = z.object({
     ),
   description: z.string().optional(),
 });
+
+export function gcloudFirewallRules(rules: Array<z.infer<typeof FirewallRuleSchema>>) {
+  return rules.map((rule) => {
+    const ports = rule.port && rule.port !== "any" ? [rule.port] : undefined;
+    if (rule.direction === "out") {
+      return {
+        direction: "EGRESS" as const,
+        protocol: rule.protocol,
+        ports,
+        sourceRanges: undefined,
+        destinationRanges: rule.destinationRanges && rule.destinationRanges.length > 0 ? rule.destinationRanges : ["0.0.0.0/0"],
+      };
+    }
+    return {
+      direction: "INGRESS" as const,
+      protocol: rule.protocol,
+      ports,
+      sourceRanges: rule.sourceRanges && rule.sourceRanges.length > 0 ? rule.sourceRanges : ["0.0.0.0/0"],
+      destinationRanges: undefined,
+    };
+  });
+}
+
 
 // ---- Helper: Parse port string to fromPort/toPort (for AWS) ----
 
@@ -932,30 +955,18 @@ component.implement("gcloud", {
         ? (networkId as string)
         : "default";
 
-      new gcp.compute.Firewall($`firewall`, {
-        name: $`firewall`,
-        network: firewallNetwork,
-        direction: "INGRESS",
-        targetTags: [fwTargetTag],
-        allows: firewallRules
-          .filter((rule: any) => rule.direction === "in")
-          .map((rule: any) => ({
-            protocol: rule.protocol,
-            ports: rule.port ? [rule.port] : undefined,
-          })),
-        sourceRanges: (() => {
-          const ranges = new Set<string>();
-          for (const rule of firewallRules) {
-            if (rule.direction === "in" && rule.sourceRanges) {
-              for (const r of rule.sourceRanges) {
-                ranges.add(r);
-              }
-            }
-          }
-          return ranges.size > 0 ? Array.from(ranges) : ["0.0.0.0/0"];
-        })(),
-        description: "Inline firewall for vm/gcloud (managed by sdlc.works)",
-      }, gcpOpts);
+      for (const [index, rule] of gcloudFirewallRules(firewallRules).entries()) {
+        new gcp.compute.Firewall($`firewall-${rule.direction.toLowerCase()}-${index}`, {
+          name: $`firewall-${rule.direction.toLowerCase()}-${index}`,
+          network: firewallNetwork,
+          direction: rule.direction,
+          targetTags: [fwTargetTag],
+          allows: [{ protocol: rule.protocol, ports: rule.ports }],
+          sourceRanges: rule.sourceRanges,
+          destinationRanges: rule.destinationRanges,
+          description: "Inline firewall for vm/gcloud (managed by sdlc.works)",
+        }, gcpOpts);
+      }
     }
 
     // 0c. Boot image lookup

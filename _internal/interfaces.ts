@@ -14,12 +14,29 @@ import { defineConnectionInterface } from "@sdlcworks/components";
 
 // ---- Postgres ----
 
+const SqlConnectionSchema = z.object({
+  uri: z.string(),
+  readUri: z.string().optional(),
+  host: z.string().optional(),
+  port: z.number().optional(),
+  database: z.string().optional(),
+  user: z.string().optional(),
+  password: z.string().optional(),
+  socketPath: z.string().optional(),
+  instanceConnectionName: z.string().optional(),
+  secretArn: z.string().optional(),
+});
+
 export const PostgresCI = defineConnectionInterface(
   "postgres",
   z.object({}),
-  z.object({
-    uri: z.string(),
-  }),
+  SqlConnectionSchema,
+);
+
+export const MysqlCI = defineConnectionInterface(
+  "mysql",
+  z.object({}),
+  SqlConnectionSchema,
 );
 
 // ---- MongoDB ----

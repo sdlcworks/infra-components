@@ -92,7 +92,7 @@ const component = new InfraComponent({
     // Storage Configuration (GCloud)
     storageClass: StorageClass.default("STANDARD").optional(),
     uniformBucketLevelAccess: UniformBucketLevelAccess.default(true).optional(),
-    publicAccessPrevention: PublicAccessPrevention.default("inherited").optional(),
+    publicAccessPrevention: PublicAccessPrevention.default("enforced").optional(),
 
     // Versioning
     versioning: z.boolean().default(false),
@@ -596,7 +596,7 @@ component.implement("aws", {
       lifecycleRules: z.array(LifecycleRuleSchema).default([]),
       corsRules: z.array(CorsRuleSchema).default([]),
       uniformBucketLevelAccess: UniformBucketLevelAccess.default(true).optional(),
-      publicAccessPrevention: PublicAccessPrevention.default("inherited").optional(),
+      publicAccessPrevention: PublicAccessPrevention.default("enforced").optional(),
       encryptionKeyName: z.string().optional(),
       labels: z.record(z.string(), z.string()).default({}),
       forceDestroy: z.boolean().default(false),

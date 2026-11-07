@@ -359,9 +359,11 @@ component.implement("gcloud", {
 
       for (const [name, value] of Object.entries(envVarsFromStore)) {
         const existing = existingEnvs.find((e: any) => e.name === name);
+        if (existing?.valueSource !== undefined) {
+          continue;
+        }
         if (existing) {
           existing.value = value;
-          delete existing.valueSource;
         } else {
           existingEnvs.push({ name, value });
         }
