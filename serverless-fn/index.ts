@@ -55,7 +55,15 @@ function artifactFilePath(uri: string): string {
 }
 
 
-const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
+const DEFAULT_CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
+
+function cloudflareApiBase(credentials: Record<string, unknown>): string {
+  const base = credentials.CLOUDFLARE_API_BASE;
+  return typeof base === "string" && base.length > 0
+    ? base.replace(/\/+$/, "")
+    : DEFAULT_CLOUDFLARE_API_BASE;
+}
+
 const ASSETS_BINDING_NAME = "ASSETS";
 const WORKER_MAIN_MODULE = "index.js";
 const WORKER_ASSETS_WORKER_DIR = "worker";
@@ -230,8 +238,8 @@ export default wrapped;`;
   return [...modules, { name: RELEASE_WITNESS_MODULE, content, contentType: ESM_MODULE_CONTENT_TYPE }];
 }
 
-async function exactRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string): Promise<boolean> {
-  const response = await fetch(`${CLOUDFLARE_API_BASE}/zones/${proof.route.zoneId}/workers/routes`, {
+async function exactRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string, apiBase: string): Promise<boolean> {
+  const response = await fetch(`${apiBase}/zones/${proof.route.zoneId}/workers/routes`, {
     headers: { Authorization: `Bearer ${apiToken}` }, signal: AbortSignal.timeout(PROOF_TIMEOUT_MS), redirect: "error",
   });
   if (!response.ok) throw new Error(`${PROOF_REFUSAL}: route observation failed (${response.status})`);
@@ -242,16 +250,16 @@ async function exactRoute(proof: PublicReleaseProof, scriptName: string, apiToke
   return matches.length === 1;
 }
 
-async function reconcileRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string): Promise<void> {
-  if (await exactRoute(proof, scriptName, apiToken)) return;
+async function reconcileRoute(proof: PublicReleaseProof, scriptName: string, apiToken: string, apiBase: string): Promise<void> {
+  if (await exactRoute(proof, scriptName, apiToken, apiBase)) return;
   try {
-    await fetch(`${CLOUDFLARE_API_BASE}/zones/${proof.route.zoneId}/workers/routes`, {
+    await fetch(`${apiBase}/zones/${proof.route.zoneId}/workers/routes`, {
       method: "POST", headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ pattern: proof.route.pattern, script: scriptName }),
       signal: AbortSignal.timeout(PROOF_TIMEOUT_MS), redirect: "error",
     });
   } catch {}
-  if (!await exactRoute(proof, scriptName, apiToken)) throw new Error(`${PROOF_REFUSAL}: route creation unconfirmed`);
+  if (!await exactRoute(proof, scriptName, apiToken, apiBase)) throw new Error(`${PROOF_REFUSAL}: route creation unconfirmed`);
 }
 
 const forbiddenAddresses = new BlockList();
@@ -326,6 +334,7 @@ interface DeployArgs {
   accountId: string;
   scriptName: string;
   apiToken: string;
+  apiBase: string;
   artifactPath: string;
   witness?: ReleaseWitness;
   settings: ScriptSettings;
@@ -425,6 +434,7 @@ async function uploadAssetManifest(
   accountId: string,
   scriptName: string,
   apiToken: string,
+  apiBase: string,
   distDir: string,
   rules: AssetRootRules,
 ): Promise<string> {
@@ -448,7 +458,7 @@ async function uploadAssetManifest(
   );
 
   const sessionResponse = await fetch(
-    `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/scripts/${scriptName}/assets-upload-session`,
+    `${apiBase}/accounts/${accountId}/workers/scripts/${scriptName}/assets-upload-session`,
     {
       method: "POST",
       headers: {
@@ -484,7 +494,7 @@ async function uploadAssetManifest(
       );
     }
     const uploadResponse = await fetch(
-      `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/assets/upload?base64=true`,
+      `${apiBase}/accounts/${accountId}/workers/assets/upload?base64=true`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${session.result.jwt}` },
@@ -509,6 +519,7 @@ async function putWorkerScript(
   accountId: string,
   scriptName: string,
   apiToken: string,
+  apiBase: string,
   metadata: Record<string, unknown>,
   modules: WorkerModule[],
   witness?: ReleaseWitness,
@@ -532,7 +543,7 @@ async function putWorkerScript(
     );
   }
   const response = await fetch(
-    `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/scripts/${scriptName}`,
+    `${apiBase}/accounts/${accountId}/workers/scripts/${scriptName}`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${apiToken}` },
@@ -559,6 +570,7 @@ async function deployScript(args: DeployArgs): Promise<void> {
     args.accountId,
     args.scriptName,
     args.apiToken,
+    args.apiBase,
     { ...baseMetadata(args.settings), bindings: args.bindings },
     [
       {
@@ -578,6 +590,7 @@ async function deployStaticSite(args: DeployArgs): Promise<void> {
     args.accountId,
     args.scriptName,
     args.apiToken,
+    args.apiBase,
     distDir,
     rules,
   );
@@ -585,6 +598,7 @@ async function deployStaticSite(args: DeployArgs): Promise<void> {
     args.accountId,
     args.scriptName,
     args.apiToken,
+    args.apiBase,
     {
       ...baseMetadata(args.settings),
       bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
@@ -625,6 +639,7 @@ async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
     args.accountId,
     args.scriptName,
     args.apiToken,
+    args.apiBase,
     assetsDir,
     rules,
   );
@@ -632,6 +647,7 @@ async function deployWorkerWithAssets(args: DeployArgs): Promise<void> {
     args.accountId,
     args.scriptName,
     args.apiToken,
+    args.apiBase,
     {
       ...baseMetadata(args.settings),
       bindings: [...args.bindings, { type: "assets", name: ASSETS_BINDING_NAME }],
@@ -1913,13 +1929,15 @@ component.implement("cloudflare", {
 
     const witness = proof ? releaseWitness(localFilePath, artifact.digest, releaseIdentities?.[componentName]) : undefined;
     const credentials = getCredentials();
+    const apiBase = cloudflareApiBase(credentials as Record<string, unknown>);
     if (proof && !credentials.CLOUDFLARE_API_TOKEN) throw new Error(`${PROOF_REFUSAL}: protected route authority required`);
-    if (proof) await exactRoute(proof, state.scriptName as string, credentials.CLOUDFLARE_API_TOKEN as string);
+    if (proof) await exactRoute(proof, state.scriptName as string, credentials.CLOUDFLARE_API_TOKEN as string, apiBase);
     const settings = state.scriptSettings as ScriptSettings;
     const args: DeployArgs = {
       accountId: state.accountId as string,
       scriptName: state.scriptName as string,
       apiToken: credentials.CLOUDFLARE_API_TOKEN as string,
+      apiBase,
       artifactPath: localFilePath,
       witness,
       settings,
@@ -1934,7 +1952,7 @@ component.implement("cloudflare", {
     else await deployScript(args);
 
     if (proof && witness) {
-      await reconcileRoute(proof, args.scriptName, args.apiToken);
+      await reconcileRoute(proof, args.scriptName, args.apiToken, apiBase);
       await observePublicRelease(proof, witness);
     }
 
